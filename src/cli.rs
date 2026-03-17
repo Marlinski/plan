@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::hub::{self, HubSummary, SessionKind};
 use crate::session;
 use crate::state::Store;
-use crate::ticket::{Priority, TicketStatus};
+use crate::ticket::{Ticket, TicketStatus};
 
 #[derive(Parser)]
 #[command(
@@ -29,111 +29,60 @@ pub enum Commands {
     /// Initialize a new .todo/ store (placed at git root if inside a repo)
     Init,
 
-    /// Show current session identity: process tree from plan up to the agent
+    /// Show project status: ticket counts + active sessions
     Status,
 
-    /// Manage tickets
-    #[command(subcommand)]
-    Ticket(TicketCommands),
-
-    /// Manage epics
-    #[command(subcommand)]
-    Epic(EpicCommands),
-
-    /// List all open, unassigned tickets
-    Backlog,
-
-    /// Show overall project summary
-    Summary,
-
-    /// Print the SKILL.md content for AI agent onboarding
-    Skill,
-
-    /// Read or send messages on the shared session hub
+    /// Add one or more tickets
     ///
-    /// With no argument: show unread messages from other sessions.
-    /// With a message: broadcast it to all active sessions.
-    Hub {
-        /// Message to broadcast (omit to read unread messages)
-        message: Option<String>,
+    /// Examples:
+    ///   plan add "fix login bug"
+    ///   plan add -t auth "fix login" "add tests" "update docs"
+    Add {
+        /// Tag(s) to apply to the new tickets (repeatable)
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
+        /// Ticket title(s) — multiple titles create multiple tickets
+        titles: Vec<String>,
     },
-}
 
-// ── Ticket subcommands ───────────────────────────────────────────────────────
-
-#[derive(Subcommand)]
-pub enum TicketCommands {
-    /// Create a new ticket
-    New {
-        /// Ticket title
-        #[arg(short, long)]
-        title: String,
-        /// Epic name to group under (ticket ID will be epic-N)
-        #[arg(short, long)]
-        epic: Option<String>,
-        /// Priority: low, medium, high
-        #[arg(short, long, default_value = "medium")]
-        priority: String,
-        /// Initial description
-        #[arg(short, long)]
-        description: Option<String>,
-    },
-    /// List tickets (default: all)
-    List {
-        /// Filter by status: open, in-progress, done, blocked
-        #[arg(short, long)]
-        status: Option<String>,
-        /// Filter by epic name
-        #[arg(short, long)]
-        epic: Option<String>,
-        /// Filter by assignee session ID
-        #[arg(short, long)]
-        assignee: Option<String>,
-    },
-    /// Show full details of a ticket
-    Show {
-        /// Ticket ID (flexible: 1 = 01 = 001, auth-1 = auth-01)
-        id: String,
-    },
-    /// Assign a ticket to a specific session ID
-    Assign {
-        /// Ticket ID
-        id: String,
-        /// Session ID (hex) to assign to
-        session: String,
-    },
-    /// Pick a ticket and assign it to the current session (implicit from process tree)
+    /// Pick a ticket — assigns it to the current session and marks it picked
     Pick {
         /// Ticket ID
         id: String,
-        /// Override session ID (default: auto-detected from parent PID)
-        #[arg(long)]
-        session: Option<String>,
     },
+
+    /// Unpick a ticket — removes assignment and resets to open (only if you picked it)
+    Unpick {
+        /// Ticket ID
+        id: String,
+    },
+
     /// Mark a ticket as done
     Done {
         /// Ticket ID
         id: String,
     },
-    /// Set the status of a ticket
-    Status {
-        /// Ticket ID
-        id: String,
-        /// New status: open, in-progress, done, blocked
-        status: String,
-    },
-    /// Append a note to a ticket
-    Note {
-        /// Ticket ID
-        id: String,
-        /// Note text to append
-        note: String,
-    },
-    /// Unassign a ticket (clear assignee, reset to open)
-    Unassign {
+
+    /// Mark a ticket as blocked
+    Block {
         /// Ticket ID
         id: String,
     },
+
+    /// Show full details of a ticket
+    Show {
+        /// Ticket ID
+        id: String,
+    },
+
+    /// Replace the description of a ticket
+    Edit {
+        /// Ticket ID
+        id: String,
+        /// New description content
+        content: String,
+    },
+
     /// Delete a ticket
     Delete {
         /// Ticket ID
@@ -142,28 +91,25 @@ pub enum TicketCommands {
         #[arg(long)]
         yes: bool,
     },
-}
 
-// ── Epic subcommands ─────────────────────────────────────────────────────────
+    /// List open tickets (backlog). Use -t TAG to filter by tag.
+    Backlog {
+        /// Filter by tag
+        #[arg(short, long = "tag")]
+        tag: Option<String>,
+    },
 
-#[derive(Subcommand)]
-pub enum EpicCommands {
-    /// Create a new epic
-    New {
-        /// Short identifier used in ticket IDs (e.g. 'backend')
-        #[arg(long)]
-        name: String,
-        /// Human-readable title
-        #[arg(long)]
-        title: String,
+    /// Read or send messages on the shared session hub
+    ///
+    /// With no argument: show active sessions + unread messages.
+    /// With a message: broadcast it to all active sessions.
+    Hub {
+        /// Message to broadcast (omit to read)
+        message: Option<String>,
     },
-    /// List all epics with ticket counts
-    List,
-    /// Show all tickets in an epic
-    Show {
-        /// Epic name
-        name: String,
-    },
+
+    /// Print the SKILL.md content for AI agent onboarding
+    Skill,
 }
 
 // ── Command dispatch ─────────────────────────────────────────────────────────
@@ -173,118 +119,75 @@ pub fn run(cli: Cli) -> Result<()> {
     let start = cli.dir.as_deref().unwrap_or(&cwd);
 
     match &cli.command {
-        Commands::Init => cmd_init(start),
-        Commands::Status => cmd_status(start),
-        Commands::Skill => cmd_skill(),
+        Commands::Init => return cmd_init(start),
+        Commands::Skill => return cmd_skill(),
         Commands::Hub { message } => {
             let store = Store::find(start)?;
-            cmd_hub(&store, message.as_deref())
+            return cmd_hub(&store, message.as_deref());
         }
-        Commands::Ticket(sub) => {
-            let store = Store::find(start)?;
-            let summary = hub_tick(&store);
-            print_header(&summary);
-            match sub {
-                TicketCommands::New {
-                    title,
-                    epic,
-                    priority,
-                    description,
-                } => {
-                    let p: Priority = priority.parse()?;
-                    cmd_ticket_new(&store, title, epic.as_deref(), p, description.as_deref())
-                }
-                TicketCommands::List {
-                    status,
-                    epic,
-                    assignee,
-                } => {
-                    let s = status
-                        .as_deref()
-                        .map(|s| s.parse::<TicketStatus>())
-                        .transpose()?;
-                    cmd_ticket_list(&store, s.as_ref(), epic.as_deref(), assignee.as_deref())
-                }
-                TicketCommands::Show { id } => cmd_ticket_show(&store, id),
-                TicketCommands::Assign { id, session } => cmd_ticket_assign(&store, id, session),
-                TicketCommands::Pick { id, session } => {
-                    let sid = resolve_session_id(session.as_deref());
-                    cmd_ticket_assign(&store, id, &sid)
-                }
-                TicketCommands::Done { id } => {
-                    cmd_ticket_set_status(&store, id, TicketStatus::Done)
-                }
-                TicketCommands::Status { id, status } => {
-                    let s: TicketStatus = status.parse()?;
-                    cmd_ticket_set_status(&store, id, s)
-                }
-                TicketCommands::Note { id, note } => cmd_ticket_note(&store, id, note),
-                TicketCommands::Unassign { id } => cmd_ticket_unassign(&store, id),
-                TicketCommands::Delete { id, yes } => cmd_ticket_delete(&store, id, *yes),
-            }
-        }
-        Commands::Epic(sub) => {
-            let store = Store::find(start)?;
-            let summary = hub_tick(&store);
-            print_header(&summary);
-            match sub {
-                EpicCommands::New { name, title } => cmd_epic_new(&store, name, title),
-                EpicCommands::List => cmd_epic_list(&store),
-                EpicCommands::Show { name } => cmd_epic_show(&store, name),
-            }
-        }
-        Commands::Backlog => {
-            let store = Store::find(start)?;
-            let summary = hub_tick(&store);
-            print_header(&summary);
-            cmd_ticket_list(&store, Some(&TicketStatus::Open), None, None)
-        }
-        Commands::Summary => {
-            let store = Store::find(start)?;
-            let summary = hub_tick(&store);
-            print_header(&summary);
-            cmd_summary(&store)
-        }
+        _ => {}
+    }
+
+    let store = Store::find(start)?;
+    let summary = hub_tick(&store);
+    print_header(&summary);
+
+    match &cli.command {
+        Commands::Init | Commands::Skill | Commands::Hub { .. } => unreachable!(),
+        Commands::Status => cmd_status(start, &summary),
+        Commands::Add { tags, titles } => cmd_add(&store, tags, titles, &summary),
+        Commands::Pick { id } => cmd_pick(&store, id, &summary),
+        Commands::Unpick { id } => cmd_unpick(&store, id, &summary),
+        Commands::Done { id } => cmd_done(&store, id),
+        Commands::Block { id } => cmd_block(&store, id),
+        Commands::Show { id } => cmd_show(&store, id),
+        Commands::Edit { id, content } => cmd_edit(&store, id, content),
+        Commands::Delete { id, yes } => cmd_delete(&store, id, *yes),
+        Commands::Backlog { tag } => cmd_backlog(&store, tag.as_deref()),
     }
 }
 
 // ── Hub helpers ───────────────────────────────────────────────────────────────
 
+/// Returns (parent_cmd_basename, full_cmdline)
+fn parent_cmdline(ppid: u32) -> (String, String) {
+    let info = session::process_info(ppid);
+    let full = info.as_ref().map(|p| p.args.clone()).unwrap_or_default();
+    let base = full
+        .split_whitespace()
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
+    (base, full)
+}
+
 /// Run hub.tick() for the current session. Silently ignores errors (hub is best-effort).
 fn hub_tick(store: &Store) -> Option<HubSummary> {
     let ppid = session::session_id();
-    let parent_info = session::process_info(ppid);
-    let parent_cmd = parent_info
-        .as_ref()
-        .map(|p| {
-            p.args
-                .split_whitespace()
-                .next()
-                .unwrap_or("unknown")
-                .to_string()
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    let full_cmdline = parent_info
-        .map(|p| p.args.clone())
-        .unwrap_or_else(|| parent_cmd.clone());
-    let (kind, client) = hub::detect(&full_cmdline);
+    let (base, full) = parent_cmdline(ppid);
+    let (kind, client) = hub::detect(&full);
     store
         .hub()
         .ok()
-        .and_then(|h| h.tick(ppid, kind, parent_cmd, client).ok())
+        .and_then(|h| h.tick(ppid, kind, base, client).ok())
 }
 
-/// Print the brief one-liner header, plus any unread messages.
+/// Detected client name for the current session (used as creator tag).
+fn my_client(ppid: u32) -> String {
+    let (_, full) = parent_cmdline(ppid);
+    hub::detect(&full).1
+}
+
+/// Print the brief one-liner header, plus any unread messages inline.
 fn print_header(summary: &Option<HubSummary>) {
     let Some(s) = summary else { return };
 
-    // Build client breakdown: "opencode × 2, zsh × 1"
     let mut client_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for sess in &s.active_sessions {
         *client_counts.entry(sess.client.clone()).or_insert(0) += 1;
     }
-    let mut client_parts: Vec<String> = client_counts
+    let mut parts: Vec<String> = client_counts
         .iter()
         .map(|(name, count)| {
             if *count > 1 {
@@ -294,12 +197,12 @@ fn print_header(summary: &Option<HubSummary>) {
             }
         })
         .collect();
-    client_parts.sort();
+    parts.sort();
 
-    let who = if client_parts.is_empty() {
+    let who = if parts.is_empty() {
         "1 session".to_string()
     } else {
-        client_parts.join(", ")
+        parts.join(", ")
     };
 
     if s.unread.is_empty() {
@@ -317,39 +220,26 @@ fn print_header(summary: &Option<HubSummary>) {
     println!();
 }
 
-// ── Formatting helpers ───────────────────────────────────────────────────────
+// ── Session ID resolution ─────────────────────────────────────────────────────
 
-fn status_icon(s: &TicketStatus) -> &'static str {
-    match s {
-        TicketStatus::Open => "[ ]",
-        TicketStatus::InProgress => "[~]",
-        TicketStatus::Done => "[x]",
-        TicketStatus::Blocked => "[!]",
-    }
-}
-
-fn priority_icon(p: &Priority) -> &'static str {
-    match p {
-        Priority::Low => "↓",
-        Priority::Medium => "→",
-        Priority::High => "↑",
-    }
-}
-
-// ── Session ID resolution ────────────────────────────────────────────────────
-
-/// Resolve the session ID: explicit override > PLAN_AGENT_ID env > hub SID (auto).
-fn resolve_session_id(override_id: Option<&str>) -> String {
-    if let Some(id) = override_id {
-        return id.to_string();
-    }
+/// Resolve current session ID: PLAN_AGENT_ID env override > hub SID (auto).
+fn my_sid() -> String {
     if let Ok(id) = std::env::var("PLAN_AGENT_ID") {
         if !id.is_empty() {
             return id;
         }
     }
-    let ppid = session::session_id();
-    hub::make_sid(ppid)
+    hub::make_sid(session::session_id())
+}
+
+// ── Formatting helpers ───────────────────────────────────────────────────────
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max - 1])
+    }
 }
 
 // ── Command implementations ──────────────────────────────────────────────────
@@ -363,71 +253,92 @@ fn cmd_init(dir: &std::path::Path) -> Result<()> {
         .unwrap_or_else(|| dir.to_path_buf());
     println!("Initialized .todo/ in {}", display.display());
     println!("Next steps:");
-    println!("  plan epic new --name <n> --title <t>  # create an epic");
-    println!("  plan ticket new --title <t>           # create a ticket");
-    println!("  plan status                           # show your session identity");
+    println!("  plan add \"ticket title\"               # create a ticket");
+    println!("  plan add -t mytag \"ticket title\"      # create a tagged ticket");
+    println!("  plan backlog                          # see open tickets");
+    println!("  plan pick <id>                        # pick a ticket");
     Ok(())
 }
 
-fn cmd_status(start: &std::path::Path) -> Result<()> {
-    let my_pid = std::process::id();
-    let ppid = session::session_id();
-    let my_sid = hub::make_sid(ppid);
-
-    println!("=== plan session status ===");
-    println!();
-    println!("Session ID : {}", my_sid);
-    println!();
-    println!("Process tree (plan → parent → grandparent ...):");
-    println!();
-
-    let chain = session::process_chain(my_pid, 8);
-    for (i, info) in chain.iter().enumerate() {
-        let marker = if i == 0 {
-            "plan"
-        } else if i == 1 {
-            "caller (session ID source)"
-        } else {
-            "ancestor"
-        };
-        println!(
-            "  {:>6}  {:>6}  [{:<26}]  {}",
-            info.pid,
-            info.ppid,
-            marker,
-            truncate(&info.args, 60)
-        );
-    }
-    println!();
-    println!("pid     ppid    [role]");
-
-    // Show active sessions if a store is available
+fn cmd_status(start: &std::path::Path, summary: &Option<HubSummary>) -> Result<()> {
     if let Ok(store) = Store::find(start) {
-        if let Ok(h) = store.hub() {
-            if let Ok(sessions) = h.list_sessions() {
-                println!();
-                println!("Active sessions:");
-                if sessions.is_empty() {
-                    println!("  (none yet — session registers on first plan command)");
-                } else {
-                    println!(
-                        "  {:<28} {:<8} {:<14} {:<12} CLIENT",
-                        "SID", "KIND", "LAST SEEN", "COMMAND"
-                    );
-                    println!("  {}", "-".repeat(76));
-                    for s in &sessions {
-                        let marker = if s.sid == my_sid { " ← you" } else { "" };
-                        println!(
-                            "  {:<28} {:<8} {:<14} {:<12} {}{}",
-                            s.sid,
-                            s.kind,
-                            s.last_seen.format("%H:%M:%S"),
-                            s.command,
-                            s.client,
-                            marker
-                        );
-                    }
-                }
+        let tickets = store.list_tickets()?;
+        let open = tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Open)
+            .count();
+        let picked = tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Picked)
+            .count();
+        let done = tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Done)
+            .count();
+        let blocked = tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Blocked)
+            .count();
+
+        println!("Tickets:");
+        println!("  [ ] open    {}", open);
+        println!("  [~] picked  {}", picked);
+        println!("  [x] done    {}", done);
+        println!("  [!] blocked {}", blocked);
+        println!("  total       {}", tickets.len());
+
+        // Currently picked
+        let in_flight: Vec<&Ticket> = tickets
+            .iter()
+            .filter(|t| t.status == TicketStatus::Picked)
+            .collect();
+        if !in_flight.is_empty() {
+            println!();
+            println!("In flight:");
+            for t in in_flight {
+                println!(
+                    "  {:>4}  [{}]  {}",
+                    t.id,
+                    t.assignee.as_deref().unwrap_or("?"),
+                    t.title
+                );
+            }
+        }
+
+        // Collect all tags with counts
+        let mut tag_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for t in &tickets {
+            for tag in &t.tags {
+                *tag_counts.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+        if !tag_counts.is_empty() {
+            let mut tag_list: Vec<(&String, &usize)> = tag_counts.iter().collect();
+            tag_list.sort_by_key(|(k, _)| k.as_str());
+            println!();
+            print!("Tags:");
+            for (tag, count) in tag_list {
+                print!("  {} ({})", tag, count);
+            }
+            println!();
+        }
+    }
+
+    // Active sessions
+    if let Some(s) = summary {
+        println!();
+        println!("Active sessions:");
+        if s.active_sessions.is_empty() {
+            println!("  (none)");
+        } else {
+            let my = my_sid();
+            for sess in &s.active_sessions {
+                let marker = if sess.sid == my { " ← you" } else { "" };
+                println!(
+                    "  {:<8} {:<28} {}{}",
+                    sess.kind, sess.sid, sess.client, marker
+                );
             }
         }
     }
@@ -435,58 +346,228 @@ fn cmd_status(start: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
+fn cmd_add(
+    store: &Store,
+    extra_tags: &[String],
+    titles: &[String],
+    summary: &Option<HubSummary>,
+) -> Result<()> {
+    if titles.is_empty() {
+        anyhow::bail!("Provide at least one ticket title");
     }
+    let creator_tag = my_client(session::session_id());
+    for title in titles {
+        let mut tags = vec![creator_tag.clone()];
+        for t in extra_tags {
+            if t != &creator_tag {
+                tags.push(t.clone());
+            }
+        }
+        let ticket = store.create_ticket(title, tags)?;
+        let tag_str = if ticket.tags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", ticket.tags.join(", "))
+        };
+        println!("#{}: {}{}", ticket.id, ticket.title, tag_str);
+    }
+    // If multiple tickets, show a summary line
+    if titles.len() > 1 {
+        println!("{} tickets created.", titles.len());
+    }
+
+    // Print the header's unread reminder if there are unread messages
+    if let Some(s) = summary {
+        if !s.unread.is_empty() {
+            println!(
+                "({} unread hub messages — run `plan hub` to read)",
+                s.unread.len()
+            );
+        }
+    }
+
+    Ok(())
 }
 
+fn cmd_pick(store: &Store, id: &str, summary: &Option<HubSummary>) -> Result<()> {
+    let mut ticket = store.load_ticket(id)?;
+    if ticket.status == TicketStatus::Picked {
+        let who = ticket.assignee.as_deref().unwrap_or("someone else");
+        if who == my_sid() {
+            anyhow::bail!("You already picked ticket #{}", ticket.id);
+        } else {
+            anyhow::bail!("Ticket #{} is already picked by session {}", ticket.id, who);
+        }
+    }
+    let sid = my_sid();
+    ticket.assignee = Some(sid.clone());
+    ticket.status = TicketStatus::Picked;
+    ticket.touch();
+    store.save_ticket(&ticket)?;
+    println!("#{}: picked  {}", ticket.id, ticket.title);
+
+    // Remind about active peers
+    if let Some(s) = summary {
+        let peers: Vec<&str> = s
+            .active_sessions
+            .iter()
+            .filter(|sess| sess.sid != sid)
+            .map(|sess| sess.client.as_str())
+            .collect();
+        if !peers.is_empty() {
+            println!("(other active sessions: {})", peers.join(", "));
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_unpick(store: &Store, id: &str, summary: &Option<HubSummary>) -> Result<()> {
+    let _ = summary;
+    let mut ticket = store.load_ticket(id)?;
+    let sid = my_sid();
+    match ticket.status {
+        TicketStatus::Picked => {
+            let owner = ticket.assignee.as_deref().unwrap_or("");
+            if owner != sid {
+                anyhow::bail!(
+                    "Ticket #{} was picked by session {}, not you",
+                    ticket.id,
+                    owner
+                );
+            }
+        }
+        other => {
+            anyhow::bail!("Ticket #{} is not picked (status: {})", ticket.id, other);
+        }
+    }
+    ticket.assignee = None;
+    ticket.status = TicketStatus::Open;
+    ticket.touch();
+    store.save_ticket(&ticket)?;
+    println!("#{}: open  {}", ticket.id, ticket.title);
+    Ok(())
+}
+
+fn cmd_done(store: &Store, id: &str) -> Result<()> {
+    let mut ticket = store.load_ticket(id)?;
+    ticket.status = TicketStatus::Done;
+    ticket.touch();
+    store.save_ticket(&ticket)?;
+    println!("#{}: done  {}", ticket.id, ticket.title);
+    Ok(())
+}
+
+fn cmd_block(store: &Store, id: &str) -> Result<()> {
+    let mut ticket = store.load_ticket(id)?;
+    ticket.status = TicketStatus::Blocked;
+    ticket.touch();
+    store.save_ticket(&ticket)?;
+    println!("#{}: blocked  {}", ticket.id, ticket.title);
+    Ok(())
+}
+
+fn cmd_show(store: &Store, id: &str) -> Result<()> {
+    let ticket = store.load_ticket(id)?;
+    println!("#{}: {}", ticket.id, ticket.title);
+    println!("Status:   {}", ticket.status);
+    println!(
+        "Tags:     {}",
+        if ticket.tags.is_empty() {
+            "-".to_string()
+        } else {
+            ticket.tags.join(", ")
+        }
+    );
+    println!("Assignee: {}", ticket.assignee.as_deref().unwrap_or("-"));
+    println!("Created:  {}", ticket.created);
+    println!("Updated:  {}", ticket.updated);
+    if !ticket.description.is_empty() {
+        println!();
+        println!("{}", ticket.description);
+    }
+    Ok(())
+}
+
+fn cmd_edit(store: &Store, id: &str, content: &str) -> Result<()> {
+    let mut ticket = store.load_ticket(id)?;
+    ticket.description = content.to_string();
+    ticket.touch();
+    store.save_ticket(&ticket)?;
+    println!("#{}: description updated", ticket.id);
+    Ok(())
+}
+
+fn cmd_delete(store: &Store, id: &str, yes: bool) -> Result<()> {
+    let ticket = store.load_ticket(id)?;
+    let canonical_id = ticket.id.clone();
+    if !yes {
+        print!("Delete ticket #{} '{}'? [y/N] ", canonical_id, ticket.title);
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+    let path = store.ticket_path(&canonical_id);
+    std::fs::remove_file(&path)
+        .with_context(|| format!("Failed to delete ticket file: {}", path.display()))?;
+    println!("Deleted #{}", canonical_id);
+    Ok(())
+}
+
+fn cmd_backlog(store: &Store, tag: Option<&str>) -> Result<()> {
+    let tickets = store.list_tickets_filtered(Some(&TicketStatus::Open), tag, None)?;
+    if tickets.is_empty() {
+        if let Some(t) = tag {
+            println!("No open tickets tagged '{}'.", t);
+        } else {
+            println!("No open tickets. Run `plan add \"title\"` to create one.");
+        }
+        return Ok(());
+    }
+    println!("{:<6} {:<30} TAGS", "ID", "TITLE");
+    println!("{}", "-".repeat(60));
+    for t in &tickets {
+        println!(
+            "#{:<5} {:<30} {}",
+            t.id,
+            truncate(&t.title, 30),
+            t.tags.join(", ")
+        );
+    }
+    Ok(())
+}
 fn cmd_hub(store: &Store, message: Option<&str>) -> Result<()> {
     let ppid = session::session_id();
-    let parent_info = session::process_info(ppid);
-    let parent_cmd = parent_info
-        .as_ref()
-        .map(|p| {
-            p.args
-                .split_whitespace()
-                .next()
-                .unwrap_or("unknown")
-                .to_string()
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-    let full_cmdline = parent_info
-        .map(|p| p.args.clone())
-        .unwrap_or_else(|| parent_cmd.clone());
-    let (kind, client) = hub::detect(&full_cmdline);
+    let (base, full) = parent_cmdline(ppid);
+    let (kind, client) = hub::detect(&full);
     let h = store.hub()?;
 
     if let Some(text) = message {
-        // Send mode: append message to own session, then tick so peers see it
-        h.say(ppid, kind.clone(), parent_cmd.clone(), client.clone(), text)?;
-        // Tick to register/refresh session (message already written above)
-        let _ = h.tick(ppid, kind, parent_cmd, client);
+        h.say(ppid, kind.clone(), base.clone(), client.clone(), text)?;
+        let _ = h.tick(ppid, kind, base, client);
         println!("Message sent.");
     } else {
-        // Read mode: tick (updates cursors) and display unread messages + who is active
-        let summary = h.tick(ppid, kind, parent_cmd, client)?;
-        let my_sid = hub::make_sid(ppid);
+        let summary = h.tick(ppid, kind, base, client)?;
+        let my = hub::make_sid(ppid);
 
-        // Active sessions
         println!("Active sessions:");
         if summary.active_sessions.is_empty() {
             println!("  (none)");
         } else {
             println!(
-                "  {:<28} {:<8} {:<14} {:<12} CLIENT",
+                "  {:<28} {:<8} {:<10} {:<12} CLIENT",
                 "SID", "KIND", "LAST SEEN", "COMMAND"
             );
-            println!("  {}", "-".repeat(76));
+            println!("  {}", "-".repeat(72));
             for s in &summary.active_sessions {
-                let marker = if s.sid == my_sid { " ← you" } else { "" };
+                let marker = if s.sid == my { " ← you" } else { "" };
                 println!(
-                    "  {:<28} {:<8} {:<14} {:<12} {}{}",
+                    "  {:<28} {:<8} {:<10} {:<12} {}{}",
                     s.sid,
                     s.kind,
                     s.last_seen.format("%H:%M:%S"),
@@ -497,7 +578,6 @@ fn cmd_hub(store: &Store, message: Option<&str>) -> Result<()> {
             }
         }
 
-        // Unread messages
         println!();
         if summary.unread.is_empty() {
             println!("No unread messages.");
@@ -518,268 +598,6 @@ fn cmd_hub(store: &Store, message: Option<&str>) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-fn cmd_ticket_new(
-    store: &Store,
-    title: &str,
-    epic: Option<&str>,
-    priority: Priority,
-    description: Option<&str>,
-) -> Result<()> {
-    let ticket = store.create_ticket(title, epic, priority, description)?;
-    println!("Created ticket: {}", ticket.id);
-    println!("Title:    {}", ticket.title);
-    println!("Priority: {}", ticket.priority);
-    if let Some(e) = &ticket.epic {
-        println!("Epic:     {}", e);
-    }
-    Ok(())
-}
-
-fn cmd_ticket_list(
-    store: &Store,
-    status: Option<&TicketStatus>,
-    epic: Option<&str>,
-    assignee: Option<&str>,
-) -> Result<()> {
-    let tickets = store.list_tickets_filtered(status, epic, assignee)?;
-    if tickets.is_empty() {
-        println!("No tickets found.");
-        return Ok(());
-    }
-    println!(
-        "{:<14} {:<4} {:<4} {:<12} {:<10} TITLE",
-        "ID", "ST", "PR", "ASSIGNEE", "UPDATED"
-    );
-    println!("{}", "-".repeat(72));
-    for t in tickets {
-        println!(
-            "{:<14} {:<4} {:<4} {:<12} {:<10} {}",
-            t.id,
-            status_icon(&t.status),
-            priority_icon(&t.priority),
-            t.assignee.as_deref().unwrap_or("-"),
-            t.updated.format("%Y-%m-%d"),
-            t.title
-        );
-    }
-    println!();
-    println!("Legend: [ ] open  [~] in-progress  [x] done  [!] blocked  ↑ high  → medium  ↓ low");
-    Ok(())
-}
-
-fn cmd_ticket_show(store: &Store, id: &str) -> Result<()> {
-    let ticket = store.load_ticket(id)?;
-    println!("ID:          {}", ticket.id);
-    println!("Title:       {}", ticket.title);
-    println!("Status:      {}", ticket.status);
-    println!("Priority:    {}", ticket.priority);
-    println!("Epic:        {}", ticket.epic.as_deref().unwrap_or("-"));
-    println!("Assignee:    {}", ticket.assignee.as_deref().unwrap_or("-"));
-    println!("Created:     {}", ticket.created);
-    println!("Updated:     {}", ticket.updated);
-    if !ticket.description.is_empty() {
-        println!("\nDescription:\n{}", ticket.description);
-    }
-    Ok(())
-}
-
-fn cmd_ticket_assign(store: &Store, id: &str, session_id: &str) -> Result<()> {
-    let mut ticket = store.load_ticket(id)?;
-    let canonical_id = ticket.id.clone();
-    ticket.assignee = Some(session_id.to_string());
-    ticket.status = TicketStatus::InProgress;
-    ticket.touch();
-    store.save_ticket(&ticket)?;
-    println!("Ticket {} assigned to session {}", canonical_id, session_id);
-    println!("Status set to: in-progress");
-    Ok(())
-}
-
-fn cmd_ticket_set_status(store: &Store, id: &str, status: TicketStatus) -> Result<()> {
-    let mut ticket = store.load_ticket(id)?;
-    let canonical_id = ticket.id.clone();
-    ticket.status = status.clone();
-    ticket.touch();
-    store.save_ticket(&ticket)?;
-    println!("Ticket {} status: {}", canonical_id, status);
-    Ok(())
-}
-
-fn cmd_ticket_note(store: &Store, id: &str, note: &str) -> Result<()> {
-    let mut ticket = store.load_ticket(id)?;
-    let canonical_id = ticket.id.clone();
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M");
-    if ticket.description.is_empty() {
-        ticket.description = format!("## Notes\n\n- [{}] {}", timestamp, note);
-    } else {
-        ticket
-            .description
-            .push_str(&format!("\n- [{}] {}", timestamp, note));
-    }
-    ticket.touch();
-    store.save_ticket(&ticket)?;
-    println!("Note added to ticket {}", canonical_id);
-    Ok(())
-}
-
-fn cmd_ticket_unassign(store: &Store, id: &str) -> Result<()> {
-    let mut ticket = store.load_ticket(id)?;
-    let canonical_id = ticket.id.clone();
-    ticket.assignee = None;
-    ticket.status = TicketStatus::Open;
-    ticket.touch();
-    store.save_ticket(&ticket)?;
-    println!("Ticket {} unassigned, status reset to open", canonical_id);
-    Ok(())
-}
-
-fn cmd_ticket_delete(store: &Store, id: &str, yes: bool) -> Result<()> {
-    let ticket = store.load_ticket(id)?;
-    let canonical_id = ticket.id.clone();
-    if !yes {
-        print!(
-            "Delete ticket '{}' ({})? [y/N] ",
-            canonical_id, ticket.title
-        );
-        use std::io::Write;
-        std::io::stdout().flush()?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted.");
-            return Ok(());
-        }
-    }
-    let path = store.ticket_path(&canonical_id);
-    std::fs::remove_file(&path)
-        .with_context(|| format!("Failed to delete ticket file: {}", path.display()))?;
-    println!("Deleted ticket {}", canonical_id);
-    Ok(())
-}
-
-fn cmd_epic_new(store: &Store, name: &str, title: &str) -> Result<()> {
-    let epic = store.create_epic(name, title)?;
-    println!("Created epic: {} — {}", epic.name, epic.title);
-    println!(
-        "Tickets in this epic will have IDs like: {}-1, {}-2, ...",
-        epic.name, epic.name
-    );
-    Ok(())
-}
-
-fn cmd_epic_list(store: &Store) -> Result<()> {
-    let epics = store.list_epics()?;
-    if epics.is_empty() {
-        println!("No epics found. Create one with: plan epic new --name <n> --title <t>");
-        return Ok(());
-    }
-    let all_tickets = store.list_tickets()?;
-    println!(
-        "{:<16} {:<8} {:<8} {:<8} TITLE",
-        "EPIC", "OPEN", "WIP", "DONE"
-    );
-    println!("{}", "-".repeat(60));
-    for epic in epics {
-        let epic_tickets: Vec<_> = all_tickets
-            .iter()
-            .filter(|t| t.epic.as_deref() == Some(&epic.name))
-            .collect();
-        let open = epic_tickets
-            .iter()
-            .filter(|t| t.status == TicketStatus::Open)
-            .count();
-        let wip = epic_tickets
-            .iter()
-            .filter(|t| t.status == TicketStatus::InProgress)
-            .count();
-        let done = epic_tickets
-            .iter()
-            .filter(|t| t.status == TicketStatus::Done)
-            .count();
-        println!(
-            "{:<16} {:<8} {:<8} {:<8} {}",
-            epic.name, open, wip, done, epic.title
-        );
-    }
-    Ok(())
-}
-
-fn cmd_epic_show(store: &Store, name: &str) -> Result<()> {
-    let path = store.epic_path(name);
-    if !path.exists() {
-        anyhow::bail!("Epic '{}' not found", name);
-    }
-    let epic = crate::epic::Epic::load(&path)?;
-    println!("Epic: {} — {}", epic.name, epic.title);
-    println!("Created: {}", epic.created);
-    if !epic.description.is_empty() {
-        println!("\n{}", epic.description);
-    }
-    println!();
-    cmd_ticket_list(store, None, Some(name), None)
-}
-
-fn cmd_summary(store: &Store) -> Result<()> {
-    let tickets = store.list_tickets()?;
-
-    let open = tickets
-        .iter()
-        .filter(|t| t.status == TicketStatus::Open)
-        .count();
-    let wip = tickets
-        .iter()
-        .filter(|t| t.status == TicketStatus::InProgress)
-        .count();
-    let done = tickets
-        .iter()
-        .filter(|t| t.status == TicketStatus::Done)
-        .count();
-    let blocked = tickets
-        .iter()
-        .filter(|t| t.status == TicketStatus::Blocked)
-        .count();
-
-    println!("=== Project Summary ===");
-    println!();
-    println!("Tickets:");
-    println!("  [ ] Open:        {}", open);
-    println!("  [~] In progress: {}", wip);
-    println!("  [x] Done:        {}", done);
-    println!("  [!] Blocked:     {}", blocked);
-    println!("  Total:           {}", tickets.len());
-
-    let epics = store.list_epics()?;
-    if !epics.is_empty() {
-        println!();
-        println!("Epics:");
-        for epic in &epics {
-            let count = tickets
-                .iter()
-                .filter(|t| t.epic.as_deref() == Some(&epic.name))
-                .count();
-            println!("  {} — {} ({} tickets)", epic.name, epic.title, count);
-        }
-    }
-
-    if wip > 0 {
-        println!();
-        println!("In progress:");
-        for t in tickets
-            .iter()
-            .filter(|t| t.status == TicketStatus::InProgress)
-        {
-            println!(
-                "  {} [{}] {}",
-                t.id,
-                t.assignee.as_deref().unwrap_or("unassigned"),
-                t.title
-            );
-        }
-    }
-
     Ok(())
 }
 

@@ -625,6 +625,7 @@ impl Hub {
         me.save(&my_path)
     }
 
+    #[allow(dead_code)]
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.load_live_sessions()
     }

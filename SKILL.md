@@ -9,8 +9,8 @@ same project; session identity is derived automatically from the process tree.
 As an AI agent you likely have a built-in todo/task tool. Use them for different things:
 
 - **your internal todo** — short-lived subtasks within a single session or task
-- **plan** — persistent, cross-agent, cross-session project work: epics, tickets,
-  backlog, assignments. Survives compaction. Visible to humans and other agents.
+- **plan** — persistent, cross-agent, cross-session project work. Survives compaction.
+  Visible to humans and other agents.
 
 Use `plan` for anything that needs to outlive the current context window.
 
@@ -28,107 +28,70 @@ plan init
 
 Automatically placed at the git root if inside a git repository.
 
-## Session identity — no registration needed
+## Session identity — automatic
 
-Your session ID is derived automatically from the PID of the process that invoked
-`plan` (the calling agent). It is stable for the lifetime of the agent process.
+Your session ID is derived from the PID of the process that invoked `plan`. It is
+stable for the lifetime of your process. Your **client name** (e.g. `opencode`,
+`claude-code`, `zsh`) is auto-detected and used as a tag on tickets you create.
 
-To see your session ID and verify the process tree:
-
+Override if needed:
 ```sh
-plan status
-```
-
-You can also override the session ID with the env var `PLAN_AGENT_ID`:
-
-```sh
-PLAN_AGENT_ID=myagent plan ticket pick 1
+PLAN_AGENT_ID=myagent plan pick 1
+PLAN_CLIENT=mybot plan add "ticket"
 ```
 
 ## Core workflow
 
 ```sh
-plan backlog                    # see open unassigned tickets
-plan ticket pick <id>           # claim a ticket (auto-assigns to current session)
-plan ticket note <id> "text"    # log progress
-plan ticket done <id>           # mark complete
-```
-
-## Session hub — inter-agent messaging
-
-Every `plan` command prints a brief header showing who is active:
-
-```
-[opencode, zsh active | 2 unread]
-```
-
-To read unread messages and see all active sessions:
-
-```sh
-plan hub
-```
-
-To broadcast a message to all active sessions:
-
-```sh
-plan hub "blocked on auth-3, taking ticket auth-4 instead"
-```
-
-Session kind (`agent` or `human`) and client name (`opencode`, `claude-code`, `zsh`, …)
-are detected automatically from the parent process. Override with env vars if needed:
-
-```sh
-PLAN_SESSION_TYPE=agent PLAN_CLIENT=mybot plan hub
+plan backlog                         # see open unassigned tickets
+plan pick <id>                       # claim a ticket
+plan done <id>                       # mark complete
+plan backlog -t <tag>                # filter by tag
 ```
 
 ## Commands
 
 ```sh
-# Init & diagnostics
-plan init
-plan status                     # show session ID and process tree
+plan init                            # initialize .todo/ store
 
-# Tickets
-plan ticket new --title "..." [--epic <name>] [--priority high|medium|low] [--description "..."]
-plan ticket list [--status open|in-progress|done|blocked] [--epic <name>] [--assignee <id>]
-plan ticket show <id>
-plan ticket pick <id> [--session <hex>]   # assign to current session (or override)
-plan ticket assign <id> <session-hex>
-plan ticket done <id>
-plan ticket status <id> open|in-progress|done|blocked
-plan ticket note <id> "text"
-plan ticket unassign <id>
-plan ticket delete <id> [--yes]
+plan add "title" ["title2" ...]      # create one or more tickets (auto-tagged with your client name)
+plan add -t TAG "title" ["title" ...]# create tickets with additional tag(s)
 
-# Epics (ticket grouping)
-plan epic new --name <name> --title "..."
-plan epic list
-plan epic show <name>
+plan pick <id>                       # pick a ticket (assigns to current session, status → picked)
+plan unpick <id>                     # unpick a ticket (only if you picked it, status → open)
+plan done <id>                       # mark a ticket done
+plan block <id>                      # mark a ticket blocked
 
-# Overview
-plan summary
-plan backlog
-plan skill
+plan show <id>                       # show full ticket details
+plan edit <id> "new description"     # replace ticket description
+plan delete <id> [--yes]             # delete a ticket
 
-# Hub (inter-agent messaging)
-plan hub                        # read unread messages + show active sessions
-plan hub "text"                 # broadcast message to all active sessions
+plan backlog                         # list all open tickets
+plan backlog -t TAG                  # list open tickets filtered by tag
+
+plan status                          # project dashboard: ticket counts, active sessions
+
+plan hub                             # show active sessions + unread messages
+plan hub "message"                   # broadcast message to all active sessions
+
+plan skill                           # print this file
 ```
 
-## Ticket IDs
+## Tags
 
-- Without epic: `1`, `2`, `3` (flexible: `1` = `01` = `001`)
-- With epic: `auth-1`, `auth-2` (flexible: `auth-1` = `auth-01`)
-- Create epic first: `plan epic new --name auth --title "Auth system"`
+- Every ticket is automatically tagged with the creator's client name (`opencode`, `zsh`, etc.)
+- Add extra tags at creation: `plan add -t auth -t backend "fix token refresh"`
+- Filter backlog by tag: `plan backlog -t auth`
+- Tags are plain strings — no registration needed
 
 ## Ticket statuses
 
-`[ ]` open · `[~]` in-progress · `[x]` done · `[!]` blocked
+`[ ]` open · `[~]` picked · `[x]` done · `[!]` blocked
 
 ## Multi-agent etiquette
 
+- Check the backlog before picking: `plan backlog`
 - Don't pick tickets already assigned to another session
-- Leave notes on tickets you're working on
-- Run `plan ticket unassign <id>` if you abandon a ticket
-- Check your assignments: `plan ticket list --assignee <your-session-id>`
-- Find your session ID: `plan status`
+- Use `plan hub` to coordinate before picking overlapping work
+- `plan unpick <id>` if you abandon a ticket (only works if you picked it)
+- Use tags to carve up areas of work: `plan backlog -t auth`

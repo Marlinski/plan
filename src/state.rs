@@ -2,9 +2,8 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::epic::Epic;
 use crate::hub::Hub;
-use crate::ticket::{atomic_write, Priority, Ticket, TicketStatus};
+use crate::ticket::{atomic_write, Ticket, TicketStatus};
 
 pub struct Store {
     pub root: PathBuf, // path to .todo/
@@ -51,7 +50,6 @@ impl Store {
             anyhow::bail!(".todo/ already exists in {}", target.display());
         }
         std::fs::create_dir_all(root.join("tickets"))?;
-        std::fs::create_dir_all(root.join("epics"))?;
         std::fs::create_dir_all(root.join("sessions"))?;
         atomic_write(&root.join("next_id"), "1\n")?;
         Ok(Store { root })
@@ -63,10 +61,6 @@ impl Store {
         self.root.join("tickets").join(format!("{}.md", id))
     }
 
-    pub fn epic_path(&self, name: &str) -> PathBuf {
-        self.root.join("epics").join(format!("{}.md", name))
-    }
-
     /// Open (or create) the sessions hub for this store.
     pub fn hub(&self) -> Result<Hub> {
         Hub::open(self.root.join("sessions"))
@@ -74,45 +68,20 @@ impl Store {
 
     // ── Ticket ID generation ─────────────────────────────────────────────────
 
-    pub fn next_ticket_id(&self, epic: Option<&str>) -> Result<String> {
+    pub fn next_ticket_id(&self) -> Result<String> {
         let counter_path = self.root.join("next_id");
         let raw = std::fs::read_to_string(&counter_path).unwrap_or_else(|_| "1\n".to_string());
         let n: u64 = raw.trim().parse().unwrap_or(1);
         atomic_write(&counter_path, &format!("{}\n", n + 1))?;
-        Ok(match epic {
-            Some(e) => format!("{}-{}", e, n),
-            None => format!("{}", n),
-        })
+        Ok(format!("{}", n))
     }
 
     // ── Ticket operations ────────────────────────────────────────────────────
 
-    pub fn create_ticket(
-        &self,
-        title: &str,
-        epic: Option<&str>,
-        priority: Priority,
-        description: Option<&str>,
-    ) -> Result<Ticket> {
-        if let Some(e) = epic {
-            if !self.epic_path(e).exists() {
-                anyhow::bail!(
-                    "Epic '{}' does not exist. Create it first with: plan epic new --name {}",
-                    e,
-                    e
-                );
-            }
-        }
-        let id = self.next_ticket_id(epic)?;
-        let mut ticket = Ticket::new(
-            id.clone(),
-            title.to_string(),
-            epic.map(|s| s.to_string()),
-            priority,
-        );
-        if let Some(desc) = description {
-            ticket.description = desc.to_string();
-        }
+    /// Create one ticket. `tags` should already include the creator tag.
+    pub fn create_ticket(&self, title: &str, tags: Vec<String>) -> Result<Ticket> {
+        let id = self.next_ticket_id()?;
+        let ticket = Ticket::new(id.clone(), title.to_string(), tags);
         let path = self.ticket_path(&id);
         ticket.save(&path)?;
         Ok(ticket)
@@ -123,55 +92,22 @@ impl Store {
         if path.exists() {
             return Ticket::load(&path);
         }
+        // Try resolving stripped-zero IDs
         let resolved = self.resolve_ticket_id(id)?;
         Ticket::load(&self.ticket_path(&resolved))
     }
 
-    /// Resolve a flexible ticket ID (leading zeros, etc.) to the canonical stored ID.
+    /// Resolve a flexible ticket ID (e.g. "01" → "1") to the canonical stored ID.
     pub fn resolve_ticket_id(&self, id: &str) -> Result<String> {
-        let parsed_num = if id.contains('-') {
-            let parts: Vec<&str> = id.rsplitn(2, '-').collect();
-            let num_part = parts[0].trim_start_matches('0');
-            let epic_part = parts[1];
-            let num = if num_part.is_empty() { "0" } else { num_part };
-            Some((Some(epic_part.to_string()), num.parse::<u64>().ok()))
-        } else {
-            let trimmed = id.trim_start_matches('0');
-            let num = if trimmed.is_empty() { "0" } else { trimmed };
-            Some((None, num.parse::<u64>().ok()))
-        };
-
+        let trimmed = id.trim_start_matches('0');
+        let num: u64 = trimmed
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid ticket ID: '{}'", id))?;
         let tickets = self.list_tickets()?;
         for ticket in &tickets {
-            match &parsed_num {
-                Some((Some(epic), Some(n))) => {
-                    if let Some(ref te) = ticket.epic {
-                        if te == epic {
-                            let suffix = ticket
-                                .id
-                                .rsplit('-')
-                                .next()
-                                .and_then(|s| s.trim_start_matches('0').parse::<u64>().ok())
-                                .unwrap_or(0);
-                            if suffix == *n {
-                                return Ok(ticket.id.clone());
-                            }
-                        }
-                    }
-                }
-                Some((None, Some(n))) => {
-                    if !ticket.id.contains('-') {
-                        let tid = ticket
-                            .id
-                            .trim_start_matches('0')
-                            .parse::<u64>()
-                            .unwrap_or(u64::MAX);
-                        if tid == *n {
-                            return Ok(ticket.id.clone());
-                        }
-                    }
-                }
-                _ => {}
+            let tid: u64 = ticket.id.parse().unwrap_or(u64::MAX);
+            if tid == num {
+                return Ok(ticket.id.clone());
             }
         }
         anyhow::bail!("Ticket '{}' not found", id)
@@ -197,64 +133,22 @@ impl Store {
                 }
             }
         }
-        tickets.sort_by(|a, b| ticket_id_order(&a.id).cmp(&ticket_id_order(&b.id)));
+        tickets.sort_by_key(|t| t.id.parse::<u64>().unwrap_or(0));
         Ok(tickets)
     }
 
     pub fn list_tickets_filtered(
         &self,
         status: Option<&TicketStatus>,
-        epic: Option<&str>,
+        tag: Option<&str>,
         assignee: Option<&str>,
     ) -> Result<Vec<Ticket>> {
         let all = self.list_tickets()?;
         Ok(all
             .into_iter()
             .filter(|t| status.is_none_or(|s| &t.status == s))
-            .filter(|t| epic.is_none_or(|e| t.epic.as_deref() == Some(e)))
+            .filter(|t| tag.is_none_or(|tg| t.tags.iter().any(|tt| tt == tg)))
             .filter(|t| assignee.is_none_or(|a| t.assignee.as_deref() == Some(a)))
             .collect())
-    }
-
-    // ── Epic operations ──────────────────────────────────────────────────────
-
-    pub fn create_epic(&self, name: &str, title: &str) -> Result<Epic> {
-        let path = self.epic_path(name);
-        if path.exists() {
-            anyhow::bail!("Epic '{}' already exists", name);
-        }
-        let epic = Epic::new(name.to_string(), title.to_string());
-        epic.save(&path)?;
-        Ok(epic)
-    }
-
-    pub fn list_epics(&self) -> Result<Vec<Epic>> {
-        let dir = self.root.join("epics");
-        let mut epics = Vec::new();
-        for entry in std::fs::read_dir(&dir)
-            .with_context(|| format!("Failed to read epics directory: {}", dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                match Epic::load(&path) {
-                    Ok(e) => epics.push(e),
-                    Err(e) => eprintln!("Warning: skipping {:?}: {}", path, e),
-                }
-            }
-        }
-        epics.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(epics)
-    }
-}
-
-fn ticket_id_order(id: &str) -> (String, u64) {
-    if let Some(pos) = id.rfind('-') {
-        let epic = id[..pos].to_string();
-        let num = id[pos + 1..].parse::<u64>().unwrap_or(0);
-        (epic, num)
-    } else {
-        let num = id.parse::<u64>().unwrap_or(0);
-        (String::new(), num)
     }
 }

@@ -8,7 +8,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TicketStatus {
     Open,
-    InProgress,
+    Picked,
     Done,
     Blocked,
 }
@@ -30,7 +30,7 @@ impl fmt::Display for TicketStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TicketStatus::Open => write!(f, "open"),
-            TicketStatus::InProgress => write!(f, "in-progress"),
+            TicketStatus::Picked => write!(f, "picked"),
             TicketStatus::Done => write!(f, "done"),
             TicketStatus::Blocked => write!(f, "blocked"),
         }
@@ -42,43 +42,13 @@ impl std::str::FromStr for TicketStatus {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "open" => Ok(TicketStatus::Open),
-            "in-progress" | "inprogress" | "in_progress" => Ok(TicketStatus::InProgress),
+            "picked" | "in-progress" | "inprogress" | "in_progress" => Ok(TicketStatus::Picked),
             "done" => Ok(TicketStatus::Done),
             "blocked" => Ok(TicketStatus::Blocked),
             other => anyhow::bail!(
-                "Unknown status: '{}'. Valid: open, in-progress, done, blocked",
+                "Unknown status: '{}'. Valid: open, picked, done, blocked",
                 other
             ),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Priority {
-    Low,
-    Medium,
-    High,
-}
-
-impl fmt::Display for Priority {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Priority::Low => write!(f, "low"),
-            Priority::Medium => write!(f, "medium"),
-            Priority::High => write!(f, "high"),
-        }
-    }
-}
-
-impl std::str::FromStr for Priority {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "low" => Ok(Priority::Low),
-            "medium" | "med" => Ok(Priority::Medium),
-            "high" => Ok(Priority::High),
-            other => anyhow::bail!("Unknown priority: '{}'. Valid: low, medium, high", other),
         }
     }
 }
@@ -88,26 +58,27 @@ pub struct Ticket {
     pub id: String,
     pub title: String,
     pub status: TicketStatus,
-    pub epic: Option<String>,
+    /// Free-form tags. The creator's client name is always the first tag.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Session ID of the session that has picked this ticket.
     pub assignee: Option<String>,
     pub created: NaiveDate,
     pub updated: NaiveDate,
-    pub priority: Priority,
     pub description: String,
 }
 
 impl Ticket {
-    pub fn new(id: String, title: String, epic: Option<String>, priority: Priority) -> Self {
+    pub fn new(id: String, title: String, tags: Vec<String>) -> Self {
         let today = chrono::Local::now().date_naive();
         Ticket {
             id,
             title,
             status: TicketStatus::Open,
-            epic,
+            tags,
             assignee: None,
             created: today,
             updated: today,
-            priority,
             description: String::new(),
         }
     }

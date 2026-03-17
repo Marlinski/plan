@@ -6,7 +6,9 @@ use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
+    #[allow(dead_code)]
     pub pid: u32,
+    #[allow(dead_code)]
     pub ppid: u32,
     #[allow(dead_code)]
     pub command: String,
@@ -156,6 +158,7 @@ fn libc_ppid() -> u32 {
 
 /// Build the process ancestry chain starting from a given PID, walking upward.
 /// Returns vec of ProcessInfo from the given pid up to init/PID1.
+#[allow(dead_code)]
 pub fn process_chain(start_pid: u32, max_depth: usize) -> Vec<ProcessInfo> {
     let mut chain = Vec::new();
     let mut pid = start_pid;

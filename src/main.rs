@@ -1,5 +1,4 @@
 mod cli;
-mod epic;
 mod hub;
 mod session;
 mod state;
