@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::epic::Epic;
+use crate::hub::Hub;
 use crate::ticket::{atomic_write, Priority, Ticket, TicketStatus};
 
 pub struct Store {
@@ -51,6 +52,7 @@ impl Store {
         }
         std::fs::create_dir_all(root.join("tickets"))?;
         std::fs::create_dir_all(root.join("epics"))?;
+        std::fs::create_dir_all(root.join("sessions"))?;
         atomic_write(&root.join("next_id"), "1\n")?;
         Ok(Store { root })
     }
@@ -63,6 +65,11 @@ impl Store {
 
     pub fn epic_path(&self, name: &str) -> PathBuf {
         self.root.join("epics").join(format!("{}.md", name))
+    }
+
+    /// Open (or create) the sessions hub for this store.
+    pub fn hub(&self) -> Result<Hub> {
+        Hub::open(self.root.join("sessions"))
     }
 
     // ── Ticket ID generation ─────────────────────────────────────────────────

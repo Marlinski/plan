@@ -179,6 +179,7 @@ pub fn process_chain(start_pid: u32, max_depth: usize) -> Vec<ProcessInfo> {
 }
 
 /// Format a session ID (u32 PID) as a short hex string for display / storage.
+#[allow(dead_code)]
 pub fn session_id_hex(sid: u32) -> String {
     format!("{:x}", sid)
 }

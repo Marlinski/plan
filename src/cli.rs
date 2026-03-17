@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use crate::hub::{self, HubSummary, SessionKind};
 use crate::session;
 use crate::state::Store;
 use crate::ticket::{Priority, TicketStatus};
@@ -47,6 +48,15 @@ pub enum Commands {
 
     /// Print the SKILL.md content for AI agent onboarding
     Skill,
+
+    /// Read or send messages on the shared session hub
+    ///
+    /// With no argument: show unread messages from other sessions.
+    /// With a message: broadcast it to all active sessions.
+    Hub {
+        /// Message to broadcast (omit to read unread messages)
+        message: Option<String>,
+    },
 }
 
 // ── Ticket subcommands ───────────────────────────────────────────────────────
@@ -164,9 +174,16 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Commands::Init => cmd_init(start),
-        Commands::Status => cmd_status(),
+        Commands::Status => cmd_status(start),
+        Commands::Skill => cmd_skill(),
+        Commands::Hub { message } => {
+            let store = Store::find(start)?;
+            cmd_hub(&store, message.as_deref())
+        }
         Commands::Ticket(sub) => {
             let store = Store::find(start)?;
+            let summary = hub_tick(&store);
+            print_header(&summary);
             match sub {
                 TicketCommands::New {
                     title,
@@ -208,6 +225,8 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Epic(sub) => {
             let store = Store::find(start)?;
+            let summary = hub_tick(&store);
+            print_header(&summary);
             match sub {
                 EpicCommands::New { name, title } => cmd_epic_new(&store, name, title),
                 EpicCommands::List => cmd_epic_list(&store),
@@ -216,30 +235,86 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Backlog => {
             let store = Store::find(start)?;
+            let summary = hub_tick(&store);
+            print_header(&summary);
             cmd_ticket_list(&store, Some(&TicketStatus::Open), None, None)
         }
         Commands::Summary => {
             let store = Store::find(start)?;
+            let summary = hub_tick(&store);
+            print_header(&summary);
             cmd_summary(&store)
         }
-        Commands::Skill => cmd_skill(),
     }
 }
 
-// ── Session ID resolution ────────────────────────────────────────────────────
+// ── Hub helpers ───────────────────────────────────────────────────────────────
 
-/// Resolve the session ID: explicit override > PLAN_AGENT_ID env > parent PID (auto).
-fn resolve_session_id(override_id: Option<&str>) -> String {
-    if let Some(id) = override_id {
-        return id.to_string();
+/// Run hub.tick() for the current session. Silently ignores errors (hub is best-effort).
+fn hub_tick(store: &Store) -> Option<HubSummary> {
+    let ppid = session::session_id();
+    let parent_info = session::process_info(ppid);
+    let parent_cmd = parent_info
+        .as_ref()
+        .map(|p| {
+            p.args
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let full_cmdline = parent_info
+        .map(|p| p.args.clone())
+        .unwrap_or_else(|| parent_cmd.clone());
+    let (kind, client) = hub::detect(&full_cmdline);
+    store
+        .hub()
+        .ok()
+        .and_then(|h| h.tick(ppid, kind, parent_cmd, client).ok())
+}
+
+/// Print the brief one-liner header, plus any unread messages.
+fn print_header(summary: &Option<HubSummary>) {
+    let Some(s) = summary else { return };
+
+    // Build client breakdown: "opencode × 2, zsh × 1"
+    let mut client_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for sess in &s.active_sessions {
+        *client_counts.entry(sess.client.clone()).or_insert(0) += 1;
     }
-    if let Ok(id) = std::env::var("PLAN_AGENT_ID") {
-        if !id.is_empty() {
-            return id;
+    let mut client_parts: Vec<String> = client_counts
+        .iter()
+        .map(|(name, count)| {
+            if *count > 1 {
+                format!("{} ×{}", name, count)
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    client_parts.sort();
+
+    let who = if client_parts.is_empty() {
+        "1 session".to_string()
+    } else {
+        client_parts.join(", ")
+    };
+
+    if s.unread.is_empty() {
+        println!("[{} active]", who);
+    } else {
+        println!("[{} active | {} unread]", who, s.unread.len());
+        for msg in &s.unread {
+            let kind_tag = match msg.from_kind {
+                SessionKind::Human => "human",
+                SessionKind::Agent => "agent",
+            };
+            println!("  {} ({}) says: {}", msg.from_client, kind_tag, msg.text);
         }
     }
-    // Auto-detect: use parent PID as session identity
-    session::session_id_hex(session::session_id())
+    println!();
 }
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
@@ -261,6 +336,22 @@ fn priority_icon(p: &Priority) -> &'static str {
     }
 }
 
+// ── Session ID resolution ────────────────────────────────────────────────────
+
+/// Resolve the session ID: explicit override > PLAN_AGENT_ID env > hub SID (auto).
+fn resolve_session_id(override_id: Option<&str>) -> String {
+    if let Some(id) = override_id {
+        return id.to_string();
+    }
+    if let Ok(id) = std::env::var("PLAN_AGENT_ID") {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+    let ppid = session::session_id();
+    hub::make_sid(ppid)
+}
+
 // ── Command implementations ──────────────────────────────────────────────────
 
 fn cmd_init(dir: &std::path::Path) -> Result<()> {
@@ -278,19 +369,18 @@ fn cmd_init(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status() -> Result<()> {
+fn cmd_status(start: &std::path::Path) -> Result<()> {
     let my_pid = std::process::id();
-    let session_ppid = session::session_id();
-    let session_hex = session::session_id_hex(session_ppid);
+    let ppid = session::session_id();
+    let my_sid = hub::make_sid(ppid);
 
     println!("=== plan session status ===");
     println!();
-    println!("Session ID (use this as assignee): {}", session_hex);
+    println!("Session ID : {}", my_sid);
     println!();
     println!("Process tree (plan → parent → grandparent ...):");
     println!();
 
-    // Start from plan's own PID and walk up
     let chain = session::process_chain(my_pid, 8);
     for (i, info) in chain.iter().enumerate() {
         let marker = if i == 0 {
@@ -308,9 +398,40 @@ fn cmd_status() -> Result<()> {
             truncate(&info.args, 60)
         );
     }
-
     println!();
     println!("pid     ppid    [role]");
+
+    // Show active sessions if a store is available
+    if let Ok(store) = Store::find(start) {
+        if let Ok(h) = store.hub() {
+            if let Ok(sessions) = h.list_sessions() {
+                println!();
+                println!("Active sessions:");
+                if sessions.is_empty() {
+                    println!("  (none yet — session registers on first plan command)");
+                } else {
+                    println!(
+                        "  {:<28} {:<8} {:<14} {:<12} CLIENT",
+                        "SID", "KIND", "LAST SEEN", "COMMAND"
+                    );
+                    println!("  {}", "-".repeat(76));
+                    for s in &sessions {
+                        let marker = if s.sid == my_sid { " ← you" } else { "" };
+                        println!(
+                            "  {:<28} {:<8} {:<14} {:<12} {}{}",
+                            s.sid,
+                            s.kind,
+                            s.last_seen.format("%H:%M:%S"),
+                            s.command,
+                            s.client,
+                            marker
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -320,6 +441,84 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}…", &s[..max - 1])
     }
+}
+
+fn cmd_hub(store: &Store, message: Option<&str>) -> Result<()> {
+    let ppid = session::session_id();
+    let parent_info = session::process_info(ppid);
+    let parent_cmd = parent_info
+        .as_ref()
+        .map(|p| {
+            p.args
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let full_cmdline = parent_info
+        .map(|p| p.args.clone())
+        .unwrap_or_else(|| parent_cmd.clone());
+    let (kind, client) = hub::detect(&full_cmdline);
+    let h = store.hub()?;
+
+    if let Some(text) = message {
+        // Send mode: append message to own session, then tick so peers see it
+        h.say(ppid, kind.clone(), parent_cmd.clone(), client.clone(), text)?;
+        // Tick to register/refresh session (message already written above)
+        let _ = h.tick(ppid, kind, parent_cmd, client);
+        println!("Message sent.");
+    } else {
+        // Read mode: tick (updates cursors) and display unread messages + who is active
+        let summary = h.tick(ppid, kind, parent_cmd, client)?;
+        let my_sid = hub::make_sid(ppid);
+
+        // Active sessions
+        println!("Active sessions:");
+        if summary.active_sessions.is_empty() {
+            println!("  (none)");
+        } else {
+            println!(
+                "  {:<28} {:<8} {:<14} {:<12} CLIENT",
+                "SID", "KIND", "LAST SEEN", "COMMAND"
+            );
+            println!("  {}", "-".repeat(76));
+            for s in &summary.active_sessions {
+                let marker = if s.sid == my_sid { " ← you" } else { "" };
+                println!(
+                    "  {:<28} {:<8} {:<14} {:<12} {}{}",
+                    s.sid,
+                    s.kind,
+                    s.last_seen.format("%H:%M:%S"),
+                    s.command,
+                    s.client,
+                    marker
+                );
+            }
+        }
+
+        // Unread messages
+        println!();
+        if summary.unread.is_empty() {
+            println!("No unread messages.");
+        } else {
+            println!("Unread messages:");
+            for msg in &summary.unread {
+                let kind_tag = match msg.from_kind {
+                    SessionKind::Human => "human",
+                    SessionKind::Agent => "agent",
+                };
+                println!(
+                    "  [{}] {} ({}): {}",
+                    msg.ts.format("%H:%M:%S"),
+                    msg.from_client,
+                    kind_tag,
+                    msg.text
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cmd_ticket_new(

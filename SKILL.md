@@ -54,6 +54,33 @@ plan ticket note <id> "text"    # log progress
 plan ticket done <id>           # mark complete
 ```
 
+## Session hub — inter-agent messaging
+
+Every `plan` command prints a brief header showing who is active:
+
+```
+[opencode, zsh active | 2 unread]
+```
+
+To read unread messages and see all active sessions:
+
+```sh
+plan hub
+```
+
+To broadcast a message to all active sessions:
+
+```sh
+plan hub "blocked on auth-3, taking ticket auth-4 instead"
+```
+
+Session kind (`agent` or `human`) and client name (`opencode`, `claude-code`, `zsh`, …)
+are detected automatically from the parent process. Override with env vars if needed:
+
+```sh
+PLAN_SESSION_TYPE=agent PLAN_CLIENT=mybot plan hub
+```
+
 ## Commands
 
 ```sh
@@ -82,6 +109,10 @@ plan epic show <name>
 plan summary
 plan backlog
 plan skill
+
+# Hub (inter-agent messaging)
+plan hub                        # read unread messages + show active sessions
+plan hub "text"                 # broadcast message to all active sessions
 ```
 
 ## Ticket IDs
