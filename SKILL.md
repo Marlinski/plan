@@ -14,19 +14,10 @@ As an AI agent you likely have a built-in todo/task tool. Use them for different
 
 Use `plan` for anything that needs to outlive the current context window.
 
-## Install
+## Setup
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Marlinski/plan/main/install.sh | sh
-```
-
-## Setup (once per project)
-
-```sh
-plan init
-```
-
-Automatically placed at the git root if inside a git repository.
+No setup needed. `.todo/` is created automatically at the git root (or cwd) on
+the first `plan` command.
 
 ## Session identity — automatic
 
@@ -52,8 +43,6 @@ plan backlog -t <tag>                # filter by tag
 ## Commands
 
 ```sh
-plan init                            # initialize .todo/ store
-
 plan add "title" ["title2" ...]      # create one or more tickets (auto-tagged with your client name)
 plan add -t TAG "title" ["title" ...]# create tickets with additional tag(s)
 

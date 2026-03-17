@@ -23,7 +23,7 @@ impl Store {
         }
     }
 
-    /// Find and open the .todo/ store, walking up from `start`.
+    /// Find the .todo/ store walking up from `start`, or create it if not found.
     pub fn find(start: &Path) -> Result<Self> {
         let mut dir = start.to_path_buf();
         loop {
@@ -35,23 +35,20 @@ impl Store {
                 break;
             }
         }
-        let init_dir = Self::find_git_root(start).unwrap_or_else(|| start.to_path_buf());
-        anyhow::bail!(
-            "No .todo directory found. Run `plan init` in {}",
-            init_dir.display()
-        )
+        // Not found — create at git root or cwd
+        Self::create(start)
     }
 
-    /// Initialize a new .todo/ store at the git root, or `dir` if not in a repo.
-    pub fn init(dir: &Path) -> Result<Self> {
+    /// Create a new .todo/ store at the git root, or `dir` if not in a repo.
+    fn create(dir: &Path) -> Result<Self> {
         let target = Self::find_git_root(dir).unwrap_or_else(|| dir.to_path_buf());
         let root = target.join(".todo");
-        if root.exists() {
-            anyhow::bail!(".todo/ already exists in {}", target.display());
-        }
         std::fs::create_dir_all(root.join("tickets"))?;
         std::fs::create_dir_all(root.join("sessions"))?;
-        atomic_write(&root.join("next_id"), "1\n")?;
+        let counter_path = root.join("next_id");
+        if !counter_path.exists() {
+            atomic_write(&counter_path, "1\n")?;
+        }
         Ok(Store { root })
     }
 

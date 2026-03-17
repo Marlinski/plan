@@ -26,9 +26,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new .todo/ store (placed at git root if inside a repo)
-    Init,
-
     /// Show project status: ticket counts + active sessions
     Status,
 
@@ -119,7 +116,6 @@ pub fn run(cli: Cli) -> Result<()> {
     let start = cli.dir.as_deref().unwrap_or(&cwd);
 
     match &cli.command {
-        Commands::Init => return cmd_init(start),
         Commands::Skill => return cmd_skill(),
         Commands::Hub { message } => {
             let store = Store::find(start)?;
@@ -133,7 +129,7 @@ pub fn run(cli: Cli) -> Result<()> {
     print_header(&summary);
 
     match &cli.command {
-        Commands::Init | Commands::Skill | Commands::Hub { .. } => unreachable!(),
+        Commands::Skill | Commands::Hub { .. } => unreachable!(),
         Commands::Status => cmd_status(start, &summary),
         Commands::Add { tags, titles } => cmd_add(&store, tags, titles, &summary),
         Commands::Pick { id } => cmd_pick(&store, id, &summary),
@@ -243,22 +239,6 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 // ── Command implementations ──────────────────────────────────────────────────
-
-fn cmd_init(dir: &std::path::Path) -> Result<()> {
-    let store = Store::init(dir)?;
-    let display = store
-        .root
-        .parent()
-        .and_then(|p| p.canonicalize().ok())
-        .unwrap_or_else(|| dir.to_path_buf());
-    println!("Initialized .todo/ in {}", display.display());
-    println!("Next steps:");
-    println!("  plan add \"ticket title\"               # create a ticket");
-    println!("  plan add -t mytag \"ticket title\"      # create a tagged ticket");
-    println!("  plan backlog                          # see open tickets");
-    println!("  plan pick <id>                        # pick a ticket");
-    Ok(())
-}
 
 fn cmd_status(start: &std::path::Path, summary: &Option<HubSummary>) -> Result<()> {
     if let Ok(store) = Store::find(start) {
