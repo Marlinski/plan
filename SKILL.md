@@ -2,7 +2,7 @@
 
 `plan` manages a `.todo/` folder as persistent state for task tracking across agents,
 shell restarts, and context compaction. Multiple agents can work in parallel on the
-same project, each with a unique 4-hex ID.
+same project; session identity is derived automatically from the process tree.
 
 ## plan vs your internal todo tool
 
@@ -28,52 +28,45 @@ plan init
 
 Automatically placed at the git root if inside a git repository.
 
-## Register — do this first, remember your ID
+## Session identity — no registration needed
+
+Your session ID is derived automatically from the PID of the process that invoked
+`plan` (the calling agent). It is stable for the lifetime of the agent process.
+
+To see your session ID and verify the process tree:
 
 ```sh
-plan register
-# prints: Agent registered: a3f2
+plan status
 ```
 
-**Store your ID immediately.** It does not persist across shell invocations.
+You can also override the session ID with the env var `PLAN_AGENT_ID`:
 
 ```sh
-AGENT_ID=a3f2   # set this in every session
+PLAN_AGENT_ID=myagent plan ticket pick 1
 ```
-
-Resuming after crash or compaction:
-
-```sh
-plan register --id a3f2     # reattaches existing session
-```
-
-If `PLAN_AGENT_ID` env var is set, `register` reattaches automatically.
-
-> Your ID is NOT remembered by the shell between tool calls. You must store it
-> yourself and pass `--agent $AGENT_ID` on commands that need it.
 
 ## Core workflow
 
 ```sh
-plan backlog                                   # see open unassigned tickets
-plan ticket pick <id> --agent $AGENT_ID        # claim a ticket
-plan ticket note <id> "progress note"          # log progress
-plan ticket done <id>                          # mark complete
+plan backlog                    # see open unassigned tickets
+plan ticket pick <id>           # claim a ticket (auto-assigns to current session)
+plan ticket note <id> "text"    # log progress
+plan ticket done <id>           # mark complete
 ```
 
 ## Commands
 
 ```sh
-# Init & register
+# Init & diagnostics
 plan init
-plan register [--id <hex>]
+plan status                     # show session ID and process tree
 
 # Tickets
 plan ticket new --title "..." [--epic <name>] [--priority high|medium|low] [--description "..."]
 plan ticket list [--status open|in-progress|done|blocked] [--epic <name>] [--assignee <id>]
 plan ticket show <id>
-plan ticket pick <id> --agent <id>
-plan ticket assign <id> <agent-id>
+plan ticket pick <id> [--session <hex>]   # assign to current session (or override)
+plan ticket assign <id> <session-hex>
 plan ticket done <id>
 plan ticket status <id> open|in-progress|done|blocked
 plan ticket note <id> "text"
@@ -84,11 +77,6 @@ plan ticket delete <id> [--yes]
 plan epic new --name <name> --title "..."
 plan epic list
 plan epic show <name>
-
-# Agents
-plan agent list
-plan agent status <id>
-plan agent retire <id>
 
 # Overview
 plan summary
@@ -108,7 +96,8 @@ plan skill
 
 ## Multi-agent etiquette
 
-- Don't pick tickets already assigned to another agent
+- Don't pick tickets already assigned to another session
 - Leave notes on tickets you're working on
 - Run `plan ticket unassign <id>` if you abandon a ticket
-- Check your assignments: `plan ticket list --assignee $AGENT_ID`
+- Check your assignments: `plan ticket list --assignee <your-session-id>`
+- Find your session ID: `plan status`

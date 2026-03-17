@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::agent::Agent;
+use crate::session;
 use crate::state::Store;
 use crate::ticket::{Priority, TicketStatus};
 
@@ -25,19 +25,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new .todo/ store in the current directory
+    /// Initialize a new .todo/ store (placed at git root if inside a repo)
     Init,
 
-    /// Register this agent session and get an ID
-    Register {
-        /// Reuse a specific agent ID (overrides PLAN_AGENT_ID env var)
-        #[arg(long)]
-        id: Option<String>,
-    },
-
-    /// Manage agent sessions
-    #[command(subcommand)]
-    Agent(AgentCommands),
+    /// Show current session identity: process tree from plan up to the agent
+    Status,
 
     /// Manage tickets
     #[command(subcommand)]
@@ -47,37 +39,14 @@ pub enum Commands {
     #[command(subcommand)]
     Epic(EpicCommands),
 
-    /// List all open, unassigned tickets (shortcut for: ticket list --status open)
+    /// List all open, unassigned tickets
     Backlog,
 
-    /// Show overall summary: ticket counts by status, active agents
+    /// Show overall project summary
     Summary,
 
     /// Print the SKILL.md content for AI agent onboarding
     Skill,
-}
-
-// ── Agent subcommands ────────────────────────────────────────────────────────
-
-#[derive(Subcommand)]
-pub enum AgentCommands {
-    /// List all registered agents
-    List,
-    /// Show details for a specific agent
-    Status {
-        /// Agent ID
-        id: String,
-    },
-    /// Mark an agent as retired
-    Retire {
-        /// Agent ID
-        id: String,
-    },
-    /// Mark an agent as crashed
-    Crash {
-        /// Agent ID
-        id: String,
-    },
 }
 
 // ── Ticket subcommands ───────────────────────────────────────────────────────
@@ -107,29 +76,29 @@ pub enum TicketCommands {
         /// Filter by epic name
         #[arg(short, long)]
         epic: Option<String>,
-        /// Filter by assignee agent ID
+        /// Filter by assignee session ID
         #[arg(short, long)]
         assignee: Option<String>,
     },
     /// Show full details of a ticket
     Show {
-        /// Ticket ID (flexible: 1 = 01 = 001)
+        /// Ticket ID (flexible: 1 = 01 = 001, auth-1 = auth-01)
         id: String,
     },
-    /// Assign a ticket to an agent
+    /// Assign a ticket to a specific session ID
     Assign {
         /// Ticket ID
         id: String,
-        /// Agent ID to assign to
-        agent: String,
+        /// Session ID (hex) to assign to
+        session: String,
     },
-    /// Pick a ticket and assign it to yourself (requires PLAN_AGENT_ID or --agent)
+    /// Pick a ticket and assign it to the current session (implicit from process tree)
     Pick {
         /// Ticket ID
         id: String,
-        /// Your agent ID (overrides PLAN_AGENT_ID)
+        /// Override session ID (default: auto-detected from parent PID)
         #[arg(long)]
-        agent: Option<String>,
+        session: Option<String>,
     },
     /// Mark a ticket as done
     Done {
@@ -143,14 +112,14 @@ pub enum TicketCommands {
         /// New status: open, in-progress, done, blocked
         status: String,
     },
-    /// Append a note to a ticket's description
+    /// Append a note to a ticket
     Note {
         /// Ticket ID
         id: String,
         /// Note text to append
         note: String,
     },
-    /// Unassign a ticket (clear assignee)
+    /// Unassign a ticket (clear assignee, reset to open)
     Unassign {
         /// Ticket ID
         id: String,
@@ -171,7 +140,7 @@ pub enum TicketCommands {
 pub enum EpicCommands {
     /// Create a new epic
     New {
-        /// Short identifier (used in ticket IDs, e.g. 'backend')
+        /// Short identifier used in ticket IDs (e.g. 'backend')
         #[arg(long)]
         name: String,
         /// Human-readable title
@@ -195,20 +164,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Commands::Init => cmd_init(start),
-        Commands::Register { id } => cmd_register(start, id.as_deref()),
-        Commands::Agent(sub) => {
-            let store = Store::find(start)?;
-            match sub {
-                AgentCommands::List => cmd_agent_list(&store),
-                AgentCommands::Status { id } => cmd_agent_status(&store, id),
-                AgentCommands::Retire { id } => {
-                    cmd_agent_set_status(&store, id, crate::agent::AgentStatus::Retired)
-                }
-                AgentCommands::Crash { id } => {
-                    cmd_agent_set_status(&store, id, crate::agent::AgentStatus::Crashed)
-                }
-            }
-        }
+        Commands::Status => cmd_status(),
         Commands::Ticket(sub) => {
             let store = Store::find(start)?;
             match sub {
@@ -233,10 +189,10 @@ pub fn run(cli: Cli) -> Result<()> {
                     cmd_ticket_list(&store, s.as_ref(), epic.as_deref(), assignee.as_deref())
                 }
                 TicketCommands::Show { id } => cmd_ticket_show(&store, id),
-                TicketCommands::Assign { id, agent } => cmd_ticket_assign(&store, id, agent),
-                TicketCommands::Pick { id, agent } => {
-                    let agent_id = resolve_agent_id(agent.as_deref())?;
-                    cmd_ticket_assign(&store, id, &agent_id)
+                TicketCommands::Assign { id, session } => cmd_ticket_assign(&store, id, session),
+                TicketCommands::Pick { id, session } => {
+                    let sid = resolve_session_id(session.as_deref());
+                    cmd_ticket_assign(&store, id, &sid)
                 }
                 TicketCommands::Done { id } => {
                     cmd_ticket_set_status(&store, id, TicketStatus::Done)
@@ -270,16 +226,23 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Session ID resolution ────────────────────────────────────────────────────
 
-fn resolve_agent_id(override_id: Option<&str>) -> Result<String> {
+/// Resolve the session ID: explicit override > PLAN_AGENT_ID env > parent PID (auto).
+fn resolve_session_id(override_id: Option<&str>) -> String {
     if let Some(id) = override_id {
-        return Ok(id.to_string());
+        return id.to_string();
     }
-    std::env::var("PLAN_AGENT_ID").with_context(|| {
-        "No agent ID found. Use --agent <id> or set PLAN_AGENT_ID environment variable.\nRun `plan register` to get an agent ID."
-    })
+    if let Ok(id) = std::env::var("PLAN_AGENT_ID") {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+    // Auto-detect: use parent PID as session identity
+    session::session_id_hex(session::session_id())
 }
+
+// ── Formatting helpers ───────────────────────────────────────────────────────
 
 fn status_icon(s: &TicketStatus) -> &'static str {
     match s {
@@ -309,85 +272,54 @@ fn cmd_init(dir: &std::path::Path) -> Result<()> {
         .unwrap_or_else(|| dir.to_path_buf());
     println!("Initialized .todo/ in {}", display.display());
     println!("Next steps:");
-    println!("  plan register              # register as an agent");
     println!("  plan epic new --name <n> --title <t>  # create an epic");
     println!("  plan ticket new --title <t>           # create a ticket");
+    println!("  plan status                           # show your session identity");
     Ok(())
 }
 
-fn cmd_register(start: &std::path::Path, id_override: Option<&str>) -> Result<()> {
-    let store = Store::find(start)?;
+fn cmd_status() -> Result<()> {
+    let my_pid = std::process::id();
+    let session_ppid = session::session_id();
+    let session_hex = session::session_id_hex(session_ppid);
 
-    // Precedence: --id arg > PLAN_AGENT_ID env > generate new
-    let requested_id = id_override
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("PLAN_AGENT_ID").ok());
-
-    let agent = store.register_agent(requested_id.as_deref())?;
-    println!("Agent registered: {}", agent.id);
-    println!("Status: {}", agent.status);
+    println!("=== plan session status ===");
     println!();
-    println!("Store this ID for the rest of your session:");
-    println!("  AGENT_ID={}", agent.id);
+    println!("Session ID (use this as assignee): {}", session_hex);
     println!();
-    println!("Commands to try:");
-    println!("  plan backlog                         # see open tickets");
-    println!(
-        "  plan ticket pick <ticket-id> --agent {}  # claim a ticket",
-        agent.id
-    );
-    Ok(())
-}
+    println!("Process tree (plan → parent → grandparent ...):");
+    println!();
 
-fn cmd_agent_list(store: &Store) -> Result<()> {
-    let agents = store.list_agents()?;
-    if agents.is_empty() {
-        println!("No agents registered.");
-        return Ok(());
-    }
-    println!(
-        "{:<8} {:<10} {:<20} {}",
-        "ID", "STATUS", "LAST SEEN", "REGISTERED"
-    );
-    println!("{}", "-".repeat(60));
-    for a in agents {
+    // Start from plan's own PID and walk up
+    let chain = session::process_chain(my_pid, 8);
+    for (i, info) in chain.iter().enumerate() {
+        let marker = if i == 0 {
+            "plan"
+        } else if i == 1 {
+            "caller (session ID source)"
+        } else {
+            "ancestor"
+        };
         println!(
-            "{:<8} {:<10} {:<20} {}",
-            a.id,
-            a.status,
-            a.last_seen.format("%Y-%m-%d %H:%M UTC"),
-            a.registered.format("%Y-%m-%d")
+            "  {:>6}  {:>6}  [{:<26}]  {}",
+            info.pid,
+            info.ppid,
+            marker,
+            truncate(&info.args, 60)
         );
     }
+
+    println!();
+    println!("pid     ppid    [role]");
     Ok(())
 }
 
-fn cmd_agent_status(store: &Store, id: &str) -> Result<()> {
-    let agent = store.load_agent(id)?;
-    println!("ID:           {}", agent.id);
-    println!("Status:       {}", agent.status);
-    println!(
-        "Registered:   {}",
-        agent.registered.format("%Y-%m-%d %H:%M UTC")
-    );
-    println!(
-        "Last seen:    {}",
-        agent.last_seen.format("%Y-%m-%d %H:%M UTC")
-    );
-    if !agent.notes.is_empty() {
-        println!("\nNotes:\n{}", agent.notes);
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max - 1])
     }
-    Ok(())
-}
-
-fn cmd_agent_set_status(store: &Store, id: &str, status: crate::agent::AgentStatus) -> Result<()> {
-    let path = store.agent_path(id);
-    let mut agent = Agent::load(&path)?;
-    agent.status = status.clone();
-    agent.touch();
-    agent.save(&path)?;
-    println!("Agent {} marked as {}", id, status);
-    Ok(())
 }
 
 fn cmd_ticket_new(
@@ -419,13 +351,13 @@ fn cmd_ticket_list(
         return Ok(());
     }
     println!(
-        "{:<12} {:<4} {:<4} {:<14} {:<10} {}",
+        "{:<14} {:<4} {:<4} {:<12} {:<10} {}",
         "ID", "ST", "PR", "ASSIGNEE", "UPDATED", "TITLE"
     );
     println!("{}", "-".repeat(72));
     for t in tickets {
         println!(
-            "{:<12} {:<4} {:<4} {:<14} {:<10} {}",
+            "{:<14} {:<4} {:<4} {:<12} {:<10} {}",
             t.id,
             status_icon(&t.status),
             priority_icon(&t.priority),
@@ -455,22 +387,14 @@ fn cmd_ticket_show(store: &Store, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_ticket_assign(store: &Store, id: &str, agent_id: &str) -> Result<()> {
-    // Validate agent exists
-    if !store.agent_path(agent_id).exists() {
-        anyhow::bail!(
-            "Agent '{}' is not registered. Run `plan register --id {}` first.",
-            agent_id,
-            agent_id
-        );
-    }
+fn cmd_ticket_assign(store: &Store, id: &str, session_id: &str) -> Result<()> {
     let mut ticket = store.load_ticket(id)?;
     let canonical_id = ticket.id.clone();
-    ticket.assignee = Some(agent_id.to_string());
-    ticket.status = crate::ticket::TicketStatus::InProgress;
+    ticket.assignee = Some(session_id.to_string());
+    ticket.status = TicketStatus::InProgress;
     ticket.touch();
     store.save_ticket(&ticket)?;
-    println!("Ticket {} assigned to agent {}", canonical_id, agent_id);
+    println!("Ticket {} assigned to session {}", canonical_id, session_id);
     println!("Status set to: in-progress");
     Ok(())
 }
@@ -601,7 +525,6 @@ fn cmd_epic_show(store: &Store, name: &str) -> Result<()> {
 
 fn cmd_summary(store: &Store) -> Result<()> {
     let tickets = store.list_tickets()?;
-    let agents = store.list_agents()?;
 
     let open = tickets
         .iter()
@@ -619,10 +542,6 @@ fn cmd_summary(store: &Store) -> Result<()> {
         .iter()
         .filter(|t| t.status == TicketStatus::Blocked)
         .count();
-    let active_agents = agents
-        .iter()
-        .filter(|a| a.status == crate::agent::AgentStatus::Active)
-        .count();
 
     println!("=== Project Summary ===");
     println!();
@@ -632,10 +551,6 @@ fn cmd_summary(store: &Store) -> Result<()> {
     println!("  [x] Done:        {}", done);
     println!("  [!] Blocked:     {}", blocked);
     println!("  Total:           {}", tickets.len());
-    println!();
-    println!("Agents:");
-    println!("  Active:  {}", active_agents);
-    println!("  Total:   {}", agents.len());
 
     let epics = store.list_epics()?;
     if !epics.is_empty() {
@@ -670,7 +585,6 @@ fn cmd_summary(store: &Store) -> Result<()> {
 }
 
 fn cmd_skill() -> Result<()> {
-    // Try to find SKILL.md relative to the binary or in common locations
     let candidates = vec![
         std::env::current_exe()
             .ok()
@@ -685,13 +599,11 @@ fn cmd_skill() -> Result<()> {
             return Ok(());
         }
     }
-    // Fallback: print embedded skill
     println!("{}", EMBEDDED_SKILL);
     Ok(())
 }
 
 fn dirs_skill_path() -> Option<PathBuf> {
-    // Check ~/.local/share/plan/SKILL.md
     std::env::var("HOME").ok().map(|h| {
         PathBuf::from(h)
             .join(".local")
@@ -701,5 +613,4 @@ fn dirs_skill_path() -> Option<PathBuf> {
     })
 }
 
-// Embedded fallback skill content (also written to SKILL.md at install time)
 const EMBEDDED_SKILL: &str = include_str!("../SKILL.md");

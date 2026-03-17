@@ -1,9 +1,7 @@
 // State management: .todo/ folder operations, ID generation, atomic writes
 use anyhow::{Context, Result};
-use rand::Rng;
 use std::path::{Path, PathBuf};
 
-use crate::agent::Agent;
 use crate::epic::Epic;
 use crate::ticket::{atomic_write, Priority, Ticket, TicketStatus};
 
@@ -13,7 +11,6 @@ pub struct Store {
 
 impl Store {
     /// Walk up from `start` to find the git root (directory containing .git/).
-    /// Returns None if no git repo is found.
     fn find_git_root(start: &Path) -> Option<PathBuf> {
         let mut dir = start.to_path_buf();
         loop {
@@ -26,12 +23,7 @@ impl Store {
         }
     }
 
-    /// Find and open the .todo/ store.
-    ///
-    /// Search order:
-    ///   1. Walk up from `start` looking for an existing .todo/ directory.
-    ///   2. If none found, fall back to the git root (or `start` if not in a git repo)
-    ///      and report a helpful error pointing to the right init location.
+    /// Find and open the .todo/ store, walking up from `start`.
     pub fn find(start: &Path) -> Result<Self> {
         let mut dir = start.to_path_buf();
         loop {
@@ -43,18 +35,14 @@ impl Store {
                 break;
             }
         }
-        // No .todo found — give a helpful error pointing to the right place
         let init_dir = Self::find_git_root(start).unwrap_or_else(|| start.to_path_buf());
         anyhow::bail!(
-            "No .todo directory found. Run `todo init` in {}",
+            "No .todo directory found. Run `plan init` in {}",
             init_dir.display()
         )
     }
 
-    /// Initialize a new .todo/ store.
-    ///
-    /// The store is created at the git root when inside a git repository,
-    /// or in `dir` otherwise.
+    /// Initialize a new .todo/ store at the git root, or `dir` if not in a repo.
     pub fn init(dir: &Path) -> Result<Self> {
         let target = Self::find_git_root(dir).unwrap_or_else(|| dir.to_path_buf());
         let root = target.join(".todo");
@@ -63,39 +51,8 @@ impl Store {
         }
         std::fs::create_dir_all(root.join("tickets"))?;
         std::fs::create_dir_all(root.join("epics"))?;
-        std::fs::create_dir_all(root.join("agents"))?;
-        // Initialize ticket counter
         atomic_write(&root.join("next_id"), "1\n")?;
         Ok(Store { root })
-    }
-
-    // ── Ticket ID generation ─────────────────────────────────────────────────
-
-    /// Allocate the next ticket ID (numeric, flexible: "1", "42", "1000")
-    pub fn next_ticket_id(&self, epic: Option<&str>) -> Result<String> {
-        let counter_path = self.root.join("next_id");
-        let raw = std::fs::read_to_string(&counter_path).unwrap_or_else(|_| "1\n".to_string());
-        let n: u64 = raw.trim().parse().unwrap_or(1);
-        // Write incremented value atomically
-        atomic_write(&counter_path, &format!("{}\n", n + 1))?;
-        Ok(match epic {
-            Some(e) => format!("{}-{}", e, n),
-            None => format!("{}", n),
-        })
-    }
-
-    // ── Agent ID generation ──────────────────────────────────────────────────
-
-    /// Generate a unique 4-hex-digit agent ID, checking for collisions
-    pub fn generate_agent_id(&self) -> Result<String> {
-        let mut rng = rand::thread_rng();
-        for _ in 0..100 {
-            let id = format!("{:04x}", rng.gen::<u16>());
-            if !self.agent_path(&id).exists() {
-                return Ok(id);
-            }
-        }
-        anyhow::bail!("Could not generate a unique agent ID after 100 attempts");
     }
 
     // ── Paths ────────────────────────────────────────────────────────────────
@@ -104,12 +61,21 @@ impl Store {
         self.root.join("tickets").join(format!("{}.md", id))
     }
 
-    pub fn agent_path(&self, id: &str) -> PathBuf {
-        self.root.join("agents").join(format!("{}.md", id))
-    }
-
     pub fn epic_path(&self, name: &str) -> PathBuf {
         self.root.join("epics").join(format!("{}.md", name))
+    }
+
+    // ── Ticket ID generation ─────────────────────────────────────────────────
+
+    pub fn next_ticket_id(&self, epic: Option<&str>) -> Result<String> {
+        let counter_path = self.root.join("next_id");
+        let raw = std::fs::read_to_string(&counter_path).unwrap_or_else(|_| "1\n".to_string());
+        let n: u64 = raw.trim().parse().unwrap_or(1);
+        atomic_write(&counter_path, &format!("{}\n", n + 1))?;
+        Ok(match epic {
+            Some(e) => format!("{}-{}", e, n),
+            None => format!("{}", n),
+        })
     }
 
     // ── Ticket operations ────────────────────────────────────────────────────
@@ -121,11 +87,10 @@ impl Store {
         priority: Priority,
         description: Option<&str>,
     ) -> Result<Ticket> {
-        // Validate epic exists if provided
         if let Some(e) = epic {
             if !self.epic_path(e).exists() {
                 anyhow::bail!(
-                    "Epic '{}' does not exist. Create it first with: todo epic new --name {}",
+                    "Epic '{}' does not exist. Create it first with: plan epic new --name {}",
                     e,
                     e
                 );
@@ -147,25 +112,20 @@ impl Store {
     }
 
     pub fn load_ticket(&self, id: &str) -> Result<Ticket> {
-        // Flexible ID matching: "1" matches "1", "01", "001", "0001" etc., and "epic-1"
         let path = self.ticket_path(id);
         if path.exists() {
             return Ticket::load(&path);
         }
-        // Try to find by numeric suffix match
         let resolved = self.resolve_ticket_id(id)?;
         Ticket::load(&self.ticket_path(&resolved))
     }
 
-    /// Resolve a flexible ticket ID to the canonical stored ID
+    /// Resolve a flexible ticket ID (leading zeros, etc.) to the canonical stored ID.
     pub fn resolve_ticket_id(&self, id: &str) -> Result<String> {
-        // Parse numeric value (strip leading zeros)
         let parsed_num = if id.contains('-') {
-            // "epic-1", "epic-01" etc: normalize the numeric part
             let parts: Vec<&str> = id.rsplitn(2, '-').collect();
             let num_part = parts[0].trim_start_matches('0');
             let epic_part = parts[1];
-            // look for epic-N match
             let num = if num_part.is_empty() { "0" } else { num_part };
             Some((Some(epic_part.to_string()), num.parse::<u64>().ok()))
         } else {
@@ -178,7 +138,6 @@ impl Store {
         for ticket in &tickets {
             match &parsed_num {
                 Some((Some(epic), Some(n))) => {
-                    // match epic-N
                     if let Some(ref te) = ticket.epic {
                         if te == epic {
                             let suffix = ticket
@@ -231,7 +190,6 @@ impl Store {
                 }
             }
         }
-        // Sort by ID: numeric if possible, else lexicographic
         tickets.sort_by(|a, b| ticket_id_order(&a.id).cmp(&ticket_id_order(&b.id)));
         Ok(tickets)
     }
@@ -249,52 +207,6 @@ impl Store {
             .filter(|t| epic.map_or(true, |e| t.epic.as_deref() == Some(e)))
             .filter(|t| assignee.map_or(true, |a| t.assignee.as_deref() == Some(a)))
             .collect())
-    }
-
-    // ── Agent operations ─────────────────────────────────────────────────────
-
-    pub fn register_agent(&self, id: Option<&str>) -> Result<Agent> {
-        let id = match id {
-            Some(existing_id) => {
-                let path = self.agent_path(existing_id);
-                if path.exists() {
-                    // Reattach: load and mark active
-                    let mut agent = Agent::load(&path)?;
-                    agent.status = crate::agent::AgentStatus::Active;
-                    agent.touch();
-                    agent.save(&path)?;
-                    return Ok(agent);
-                }
-                existing_id.to_string()
-            }
-            None => self.generate_agent_id()?,
-        };
-        let agent = Agent::new(id.clone());
-        agent.save(&self.agent_path(&id))?;
-        Ok(agent)
-    }
-
-    pub fn load_agent(&self, id: &str) -> Result<Agent> {
-        Agent::load(&self.agent_path(id))
-    }
-
-    pub fn list_agents(&self) -> Result<Vec<Agent>> {
-        let dir = self.root.join("agents");
-        let mut agents = Vec::new();
-        for entry in std::fs::read_dir(&dir)
-            .with_context(|| format!("Failed to read agents directory: {}", dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                match Agent::load(&path) {
-                    Ok(a) => agents.push(a),
-                    Err(e) => eprintln!("Warning: skipping {:?}: {}", path, e),
-                }
-            }
-        }
-        agents.sort_by(|a, b| a.registered.cmp(&b.registered));
-        Ok(agents)
     }
 
     // ── Epic operations ──────────────────────────────────────────────────────
@@ -329,7 +241,6 @@ impl Store {
     }
 }
 
-/// Comparable sort key for ticket IDs: (epic_prefix, numeric_suffix)
 fn ticket_id_order(id: &str) -> (String, u64) {
     if let Some(pos) = id.rfind('-') {
         let epic = id[..pos].to_string();
