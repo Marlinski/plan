@@ -27,50 +27,50 @@ stable for the lifetime of your process. Your **client name** (e.g. `opencode`,
 
 Override if needed:
 ```sh
-PLAN_AGENT_ID=myagent plan pick 1
-PLAN_CLIENT=mybot plan add "ticket"
+PLAN_AGENT_ID=myagent plan todo pick 1
+PLAN_CLIENT=mybot plan todo add "ticket"
 ```
 
 ## Core workflow
 
 ```sh
-plan backlog                         # see open unassigned tickets
-plan pick <id>                       # claim a ticket
-plan done <id>                       # mark complete
-plan backlog -t <tag>                # filter by tag
+plan todo                            # see open unassigned tickets (backlog)
+plan todo pick <id>                  # claim a ticket
+plan todo done <id>                  # mark complete
+plan todo backlog -t <tag>           # filter by tag
 ```
 
 ## Commands
 
 ```sh
-plan add "title" ["title2" ...]      # create one or more tickets (auto-tagged with your client name)
-plan add -t TAG "title" ["title" ...]# create tickets with additional tag(s)
+plan todo add "title" ["title2" ...]      # create one or more tickets (auto-tagged with your client name)
+plan todo add -t TAG "title" ["title" ...]# create tickets with additional tag(s)
 
-plan pick <id>                       # pick a ticket (assigns to current session, status → picked)
-plan unpick <id>                     # unpick a ticket (only if you picked it, status → open)
-plan done <id>                       # mark a ticket done
-plan block <id>                      # mark a ticket blocked
+plan todo pick <id>                       # pick a ticket (assigns to current session, status → picked)
+plan todo unpick <id>                     # unpick a ticket (only if you picked it, status → open)
+plan todo done <id>                       # mark a ticket done
+plan todo block <id>                      # mark a ticket blocked
 
-plan show <id>                       # show full ticket details
-plan edit <id> "new description"     # replace ticket description
-plan delete <id> [--yes]             # delete a ticket
+plan todo show <id>                       # show full ticket details
+plan todo edit <id> "new description"     # replace ticket description
+plan todo delete <id> [--yes]             # delete a ticket
 
-plan backlog                         # list all open tickets
-plan backlog -t TAG                  # list open tickets filtered by tag
+plan todo backlog                         # list all open tickets
+plan todo backlog -t TAG                  # list open tickets filtered by tag
 
-plan status                          # project dashboard: ticket counts, active sessions
+plan status                               # project dashboard: ticket counts, active sessions
 
-plan hub                             # show active sessions + unread messages
-plan hub "message"                   # broadcast message to all active sessions
+plan hub                                  # show active sessions + unread messages
+plan hub "message"                        # broadcast message to all active sessions
 
-plan skill                           # print this file
+plan skill                                # print this file
 ```
 
 ## Tags
 
 - Every ticket is automatically tagged with the creator's client name (`opencode`, `zsh`, etc.)
-- Add extra tags at creation: `plan add -t auth -t backend "fix token refresh"`
-- Filter backlog by tag: `plan backlog -t auth`
+- Add extra tags at creation: `plan todo add -t auth -t backend "fix token refresh"`
+- Filter backlog by tag: `plan todo backlog -t auth`
 - Tags are plain strings — no registration needed
 
 ## Ticket statuses
@@ -79,8 +79,8 @@ plan skill                           # print this file
 
 ## Multi-agent etiquette
 
-- Check the backlog before picking: `plan backlog`
+- Check the backlog before picking: `plan todo backlog`
 - Don't pick tickets already assigned to another session
 - Use `plan hub` to coordinate before picking overlapping work
-- `plan unpick <id>` if you abandon a ticket (only works if you picked it)
-- Use tags to carve up areas of work: `plan backlog -t auth`
+- `plan todo unpick <id>` if you abandon a ticket (only works if you picked it)
+- Use tags to carve up areas of work: `plan todo backlog -t auth`

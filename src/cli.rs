@@ -29,13 +29,37 @@ pub enum Commands {
     /// Show project status: ticket counts + active sessions
     Status,
 
+    /// Manage tickets
+    ///
+    /// With no subcommand: show the backlog (same as `plan todo backlog`).
+    #[command(subcommand_required = false, arg_required_else_help = false)]
+    Todo {
+        #[command(subcommand)]
+        sub: Option<TodoCommands>,
+    },
+
+    /// Read or send messages on the shared session hub
+    ///
+    /// With no argument: show active sessions + unread messages.
+    /// With a message: broadcast it to all active sessions.
+    Hub {
+        /// Message to broadcast (omit to read)
+        message: Option<String>,
+    },
+
+    /// Print the SKILL.md content for AI agent onboarding
+    Skill,
+}
+
+#[derive(Subcommand)]
+pub enum TodoCommands {
     /// Add one or more tickets
     ///
     /// Examples:
-    ///   plan add "fix login bug"
-    ///   plan add -t auth "fix login" "add tests" "update docs"
+    ///   plan todo add "fix login bug"
+    ///   plan todo add -t auth "fix login" "add tests" "update docs"
     Add {
-        /// Tag(s) to apply to the new tickets (repeatable)
+        /// Tag(s) to apply (repeatable: -t auth -t backend)
         #[arg(short, long = "tag")]
         tags: Vec<String>,
         /// Ticket title(s) — multiple titles create multiple tickets
@@ -89,24 +113,12 @@ pub enum Commands {
         yes: bool,
     },
 
-    /// List open tickets (backlog). Use -t TAG to filter by tag.
+    /// List open tickets. Use -t TAG to filter by tag.
     Backlog {
         /// Filter by tag
         #[arg(short, long = "tag")]
         tag: Option<String>,
     },
-
-    /// Read or send messages on the shared session hub
-    ///
-    /// With no argument: show active sessions + unread messages.
-    /// With a message: broadcast it to all active sessions.
-    Hub {
-        /// Message to broadcast (omit to read)
-        message: Option<String>,
-    },
-
-    /// Print the SKILL.md content for AI agent onboarding
-    Skill,
 }
 
 // ── Command dispatch ─────────────────────────────────────────────────────────
@@ -131,15 +143,18 @@ pub fn run(cli: Cli) -> Result<()> {
     match &cli.command {
         Commands::Skill | Commands::Hub { .. } => unreachable!(),
         Commands::Status => cmd_status(start, &summary),
-        Commands::Add { tags, titles } => cmd_add(&store, tags, titles, &summary),
-        Commands::Pick { id } => cmd_pick(&store, id, &summary),
-        Commands::Unpick { id } => cmd_unpick(&store, id, &summary),
-        Commands::Done { id } => cmd_done(&store, id),
-        Commands::Block { id } => cmd_block(&store, id),
-        Commands::Show { id } => cmd_show(&store, id),
-        Commands::Edit { id, content } => cmd_edit(&store, id, content),
-        Commands::Delete { id, yes } => cmd_delete(&store, id, *yes),
-        Commands::Backlog { tag } => cmd_backlog(&store, tag.as_deref()),
+        Commands::Todo { sub } => match sub {
+            None => cmd_backlog(&store, None),
+            Some(TodoCommands::Add { tags, titles }) => cmd_add(&store, tags, titles, &summary),
+            Some(TodoCommands::Pick { id }) => cmd_pick(&store, id, &summary),
+            Some(TodoCommands::Unpick { id }) => cmd_unpick(&store, id, &summary),
+            Some(TodoCommands::Done { id }) => cmd_done(&store, id),
+            Some(TodoCommands::Block { id }) => cmd_block(&store, id),
+            Some(TodoCommands::Show { id }) => cmd_show(&store, id),
+            Some(TodoCommands::Edit { id, content }) => cmd_edit(&store, id, content),
+            Some(TodoCommands::Delete { id, yes }) => cmd_delete(&store, id, *yes),
+            Some(TodoCommands::Backlog { tag }) => cmd_backlog(&store, tag.as_deref()),
+        },
     }
 }
 
@@ -505,7 +520,7 @@ fn cmd_backlog(store: &Store, tag: Option<&str>) -> Result<()> {
         if let Some(t) = tag {
             println!("No open tickets tagged '{}'.", t);
         } else {
-            println!("No open tickets. Run `plan add \"title\"` to create one.");
+            println!("No open tickets. Run `plan todo add \"title\"` to create one.");
         }
         return Ok(());
     }
