@@ -142,7 +142,7 @@ impl Store {
                         if te == epic {
                             let suffix = ticket
                                 .id
-                                .rsplitn(2, '-')
+                                .rsplit('-')
                                 .next()
                                 .and_then(|s| s.trim_start_matches('0').parse::<u64>().ok())
                                 .unwrap_or(0);
@@ -203,9 +203,9 @@ impl Store {
         let all = self.list_tickets()?;
         Ok(all
             .into_iter()
-            .filter(|t| status.map_or(true, |s| &t.status == s))
-            .filter(|t| epic.map_or(true, |e| t.epic.as_deref() == Some(e)))
-            .filter(|t| assignee.map_or(true, |a| t.assignee.as_deref() == Some(a)))
+            .filter(|t| status.is_none_or(|s| &t.status == s))
+            .filter(|t| epic.is_none_or(|e| t.epic.as_deref() == Some(e)))
+            .filter(|t| assignee.is_none_or(|a| t.assignee.as_deref() == Some(a)))
             .collect())
     }
 

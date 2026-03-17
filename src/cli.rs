@@ -351,8 +351,8 @@ fn cmd_ticket_list(
         return Ok(());
     }
     println!(
-        "{:<14} {:<4} {:<4} {:<12} {:<10} {}",
-        "ID", "ST", "PR", "ASSIGNEE", "UPDATED", "TITLE"
+        "{:<14} {:<4} {:<4} {:<12} {:<10} TITLE",
+        "ID", "ST", "PR", "ASSIGNEE", "UPDATED"
     );
     println!("{}", "-".repeat(72));
     for t in tickets {
@@ -479,8 +479,8 @@ fn cmd_epic_list(store: &Store) -> Result<()> {
     }
     let all_tickets = store.list_tickets()?;
     println!(
-        "{:<16} {:<8} {:<8} {:<8} {}",
-        "EPIC", "OPEN", "WIP", "DONE", "TITLE"
+        "{:<16} {:<8} {:<8} {:<8} TITLE",
+        "EPIC", "OPEN", "WIP", "DONE"
     );
     println!("{}", "-".repeat(60));
     for epic in epics {
