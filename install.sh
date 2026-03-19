@@ -129,8 +129,8 @@ esac
 
 echo "Quick start:"
 echo "  cd /your/project"
-echo "  plan init"
-echo "  plan register"
+echo "  plan todo add \"fix the login bug\""
+echo "  plan todo backlog"
 echo "  plan skill          # read the agent onboarding guide"
 echo ""
 echo "For AI agents, read the skill file:"
